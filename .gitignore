@@ -1,0 +1,11 @@
+/target
+/src-tauri/target
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+*.log
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example

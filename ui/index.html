@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SpotyBurn - Red Book CD-DA & Data Disc Mastering</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- App Header -->
+  <header class="app-header">
+    <div class="logo-group">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z"/>
+        </svg>
+      </div>
+      <div class="logo-title">
+        <h1>SpotyBurn</h1>
+        <span>Red Book CD-DA & Data Disc Engine</span>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <!-- Spotify User Section -->
+      <div id="spotify-user-container" class="spotify-user-container">
+        <button type="button" id="spotify-login-btn" class="btn btn-spotify">
+          <svg viewBox="0 0 24 24" class="spotify-icon">
+            <path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm4.586 14.424a.627.627 0 0 1-.861.208c-2.358-1.441-5.326-1.767-8.823-.968a.627.627 0 1 1-.28-1.223c3.827-.874 7.108-.506 9.756 1.122.3.183.393.578.208.861zm1.225-2.724a.786.786 0 0 1-1.082.259c-2.7-1.66-6.816-2.14-10.01-1.17a.786.786 0 1 1-.456-1.503c3.65-1.108 8.196-.575 11.289 1.332.378.232.492.73.259 1.082zm.105-2.835C14.682 8.93 9.35 8.755 6.257 9.695a.942.942 0 1 1-.55-1.802c3.553-1.078 9.444-.871 13.258 1.393a.942.942 0 0 1-1.049 1.579z"/>
+          </svg>
+          <span>Spotify Login</span>
+        </button>
+
+        <div id="user-badge" class="user-badge" style="display: none;">
+          <div class="user-avatar-wrap">
+            <img id="user-avatar" class="user-avatar" src="" alt="Avatar" />
+            <div id="user-avatar-fallback" class="user-avatar-fallback">👤</div>
+          </div>
+          <span id="user-name" class="user-name">Spotify User</span>
+          <button type="button" id="spotify-logout-btn" class="btn-logout" title="Abmelden">Abmelden</button>
+        </div>
+      </div>
+
+      <!-- Header Tool Buttons -->
+      <div class="header-actions">
+        <button type="button" id="open-logs-btn" class="btn btn-header-tool" title="Terminal-Logs & Fortschritt anzeigen">
+          <span class="tool-icon">📜</span>
+          <span class="tool-label">Logs</span>
+          <span id="log-status-badge" class="badge-status-dot"></span>
+        </button>
+        <button type="button" id="open-settings-btn" class="btn btn-header-tool" title="Einstellungen & Konfiguration">
+          <span class="tool-icon">⚙️</span>
+          <span class="tool-label">Einstellungen</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Application Workspace -->
+  <div class="app-workspace">
+    <!-- Left Sidebar: Meine Playlists -->
+    <aside class="sidebar-playlists" id="sidebar-playlists">
+      <div class="sidebar-header">
+        <div class="sidebar-title-group">
+          <h3>
+            <svg viewBox="0 0 24 24" class="sidebar-icon">
+              <path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/>
+            </svg>
+            Meine Playlists
+          </h3>
+          <span id="playlist-count-badge" class="playlist-badge">0</span>
+        </div>
+        <button type="button" id="refresh-playlists-btn" class="btn-icon-btn" title="Playlists neu laden">🔄</button>
+      </div>
+
+      <div id="playlists-scroll-area" class="playlists-scroll-area">
+        <!-- Logged-in Playlist list -->
+        <div id="playlist-list" class="playlist-list"></div>
+
+        <!-- Logged-out / Empty Prompt -->
+        <div id="playlist-login-prompt" class="playlist-login-prompt">
+          <div class="prompt-icon">🎵</div>
+          <h4>Spotify-Bibliothek</h4>
+          <p>Melde dich bei Spotify an, um deine persönlichen Playlists direkt mit einem Klick zu laden.</p>
+          <button type="button" id="sidebar-login-btn" class="btn btn-primary btn-sm">Jetzt anmelden</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-panel">
+      <!-- Search & URL Ingestion Area -->
+      <section class="ingestion-section">
+        <!-- In-App Spotify Search -->
+        <div class="search-container">
+          <div class="search-input-wrapper">
+            <svg viewBox="0 0 24 24" class="search-icon">
+              <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+            </svg>
+            <input
+              type="text"
+              id="spotify-search-input"
+              class="search-input"
+              placeholder="In Spotify suchen (Tracks, Alben, Playlists)..."
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button type="button" id="clear-search-btn" class="btn-clear-search" style="display: none;">✕</button>
+            <div id="search-spinner" class="search-spinner" style="display: none;"></div>
+          </div>
+
+          <!-- Dropdown Search Preview Results -->
+          <div id="search-dropdown" class="search-dropdown" style="display: none;">
+            <div class="search-tabs">
+              <button type="button" class="search-tab active" data-tab="all">Alle</button>
+              <button type="button" class="search-tab" data-tab="tracks">Tracks</button>
+              <button type="button" class="search-tab" data-tab="albums">Alben</button>
+              <button type="button" class="search-tab" data-tab="playlists">Playlists</button>
+            </div>
+            <div id="search-results-list" class="search-results-list"></div>
+          </div>
+        </div>
+
+        <!-- Collapsible Direct URL Ingestion -->
+        <div class="direct-url-container">
+          <div class="url-toggle-bar">
+            <button type="button" id="toggle-url-btn" class="btn-url-toggle">
+              <span class="url-toggle-icon">🔗</span>
+              <span>Direkte Spotify URL / URI eingeben</span>
+              <span id="url-toggle-chevron" class="url-toggle-chevron">▾</span>
+            </button>
+          </div>
+          <div id="url-input-collapse" class="url-input-collapse" style="display: none;">
+            <div class="url-input-row">
+              <input
+                type="text"
+                id="spotify-url-input"
+                class="input-field"
+                placeholder="https://open.spotify.com/playlist/... oder spotify:playlist:..."
+                spellcheck="false"
+              />
+              <button type="button" id="fetch-tracks-btn" class="btn btn-primary">
+                <span class="btn-label">Tracks laden</span>
+              </button>
+            </div>
+            <div id="fetch-status-msg" class="status-msg"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Reactive Capacity Meter Card -->
+      <section class="card capacity-card" id="section-capacity">
+        <div class="capacity-header">
+          <div class="capacity-title-wrap">
+            <span id="capacity-mode-title" class="capacity-title">Audio CD (Red Book 80 Min)</span>
+            <span id="capacity-subtitle" class="capacity-subtitle">Max. 80 Minuten Audio nach CD-DA Standard</span>
+          </div>
+          <div class="capacity-values">
+            <span id="capacity-duration-text" class="capacity-duration">00:00</span>
+            <span id="capacity-limit-text" class="capacity-limit"> / 80:00 (<span id="capacity-pct-text">0.0%</span>)</span>
+          </div>
+        </div>
+
+        <div class="capacity-meter-wrapper">
+          <div id="capacity-marker-74" class="capacity-marker-74" title="74 Minuten Standardgrenze"></div>
+          <div id="capacity-bar" class="capacity-bar"></div>
+        </div>
+
+        <div id="capacity-warning-banner" class="capacity-warning-banner">
+          ⚠️ <strong>Kapazität überschritten!</strong> Die gewählten Tracks überschreiten das Limit. Bitte passe die Auswahl an oder wechsle den Modus.
+        </div>
+
+        <!-- Tracklist Actions & Table -->
+        <div class="tracklist-actions">
+          <span id="selected-tracks-count" class="tracklist-count">0 von 0 Tracks ausgewählt</span>
+          <div class="tracklist-btns">
+            <button type="button" id="select-all-btn" class="btn btn-sm">Alle auswählen</button>
+            <button type="button" id="select-none-btn" class="btn btn-sm">Keine</button>
+            <button type="button" id="clear-tracks-btn" class="btn btn-sm btn-danger" title="Trackliste leeren">✕ Leeren</button>
+          </div>
+        </div>
+
+        <div class="track-table-container">
+          <table class="track-table" id="tracks-table">
+            <thead>
+              <tr>
+                <th class="col-check"><input type="checkbox" id="master-track-checkbox" checked /></th>
+                <th class="col-num">#</th>
+                <th class="col-title">Titel</th>
+                <th class="col-artist">Interpret</th>
+                <th class="col-album">Album</th>
+                <th class="col-duration">Dauer</th>
+                <th class="col-action"></th>
+              </tr>
+            </thead>
+            <tbody id="tracks-tbody">
+              <tr>
+                <td colspan="7" class="empty-state">
+                  Noch keine Tracks geladen. Wähle eine Playlist links aus, suche oben nach Songs oder gib eine Spotify-URL ein.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Bottom Control Bar: Mode Tabs, Drive Selector & Burn Execution -->
+      <section class="bottom-control-card">
+        <!-- Mode Tabs Selector -->
+        <div class="mode-tabs-container">
+          <div class="mode-tabs">
+            <button type="button" class="mode-tab active" id="mode-audio-label" data-mode="AudioCdRedBook">
+              <span class="mode-icon">💿</span>
+              <div class="mode-info">
+                <span class="mode-name">Audio CD (Red Book)</span>
+                <span class="mode-hint">44.1kHz 16-Bit WAV • Max. 80 Min</span>
+              </div>
+            </button>
+
+            <button type="button" class="mode-tab" id="mode-data-label" data-mode="DataMp3Cd">
+              <span class="mode-icon">📁</span>
+              <div class="mode-info">
+                <span class="mode-name">Data / MP3 CD</span>
+                <span class="mode-hint">ISO/UDF Filesystem • Max. 700 MB</span>
+              </div>
+            </button>
+
+            <button type="button" class="mode-tab" id="mode-export-label" data-mode="ExportOnly">
+              <span class="mode-icon">🧪</span>
+              <div class="mode-info">
+                <span class="mode-name">Test-Export (Ohne Brenner)</span>
+                <span class="mode-hint">WAV + CUE im Exportordner speichern</span>
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <!-- Hardware Drive Controls (Visible only in Burn Modes) -->
+        <div id="drive-controls-container" class="drive-controls-container">
+          <div class="drive-row">
+            <div class="drive-select-group">
+              <label for="drive-select">Brenner-Laufwerk:</label>
+              <div class="drive-selector-inner">
+                <select id="drive-select" class="input-field">
+                  <option value="">Laufwerke werden gesucht...</option>
+                </select>
+                <button type="button" id="refresh-drives-btn" class="btn btn-sm" title="Laufwerke neu einlesen">🔄</button>
+                <button type="button" id="eject-drive-btn" class="btn btn-sm" title="Medium auswerfen">⏏️ Auswerfen</button>
+              </div>
+            </div>
+
+            <div class="drive-speed-group">
+              <label for="burn-speed-select">Speed:</label>
+              <select id="burn-speed-select" class="input-field">
+                <option value="0">Auto (Optimal)</option>
+                <option value="4">4x (Beste Audio-Präzision)</option>
+                <option value="8">8x</option>
+                <option value="16">16x</option>
+                <option value="24">24x</option>
+                <option value="48">Maximal</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="media-and-options-row">
+            <div class="media-status-box">
+              <div class="media-status-indicator">
+                <div id="media-status-dot" class="status-dot"></div>
+                <span id="media-status-text">Medium wird geprüft...</span>
+              </div>
+              <button type="button" id="check-media-btn" class="btn btn-sm">Medium prüfen</button>
+            </div>
+
+            <div class="options-row">
+              <label class="checkbox-label">
+                <input type="checkbox" id="eject-after-checkbox" checked />
+                Disc nach Brennen auswerfen
+              </label>
+              <label class="checkbox-label" title="Testlauf ohne echten Laserschreibvorgang">
+                <input type="checkbox" id="simulate-checkbox" />
+                Simulationslauf
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Virtual Export Controls (Visible only in ExportOnly Mode) -->
+        <div id="export-controls-container" class="export-controls-container" style="display: none;">
+          <div class="export-info-box">
+            <span class="export-info-icon">💡</span>
+            <div class="export-info-text">
+              <strong>Virtueller Test- & Export-Modus aktiv:</strong>
+              Kein physikalischer Brenner erforderlich. Die Tracks werden via yt-dlp geladen, als Red Book 44.1kHz 16-Bit WAV transkodiert und mit normgerechtem CUE-Sheet im Export-Ordner bereitgestellt.
+            </div>
+            <button type="button" id="open-export-dir-btn" class="btn btn-sm">📂 Export-Ordner öffnen</button>
+          </div>
+        </div>
+
+        <!-- Action Button (Dynamic Burn vs Export) -->
+        <div class="action-btn-row">
+          <button type="button" id="start-burn-btn" class="btn btn-action-burn">
+            <span id="action-btn-icon">🔥</span>
+            <span id="action-btn-label">Download & Brennen</span>
+          </button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Settings Modal (⚙️) -->
+  <div id="settings-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-icon">⚙️</span>
+          <h2>Einstellungen</h2>
+        </div>
+        <button type="button" id="close-settings-btn" class="btn-modal-close" title="Schließen">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="settings-section-desc">
+            Konfiguriere deine Spotify Developer Credentials und den Arbeitsordner.
+          </div>
+
+          <div class="input-row">
+            <label for="client-id-input">Spotify Client ID</label>
+            <input type="text" id="client-id-input" class="input-field" placeholder="Client ID aus dem Spotify Developer Dashboard" spellcheck="false" />
+          </div>
+
+          <div class="input-row">
+            <label for="client-secret-input">Spotify Client Secret</label>
+            <div class="secret-wrapper">
+              <input type="password" id="client-secret-input" class="input-field" placeholder="Client Secret" spellcheck="false" />
+              <button type="button" id="toggle-secret-btn" class="btn-toggle-visibility" title="Passwort anzeigen/verbergen">👁️</button>
+            </div>
+          </div>
+
+          <div class="input-row">
+            <label for="cache-dir-input">Cache- & Export-Verzeichnis</label>
+            <div class="input-with-action">
+              <input type="text" id="cache-dir-input" class="input-field" placeholder="~/.spotyburn/cache" spellcheck="false" />
+              <button type="button" id="modal-open-cache-btn" class="btn btn-sm" title="Im Dateimanager öffnen">📂 Ordner öffnen</button>
+            </div>
+          </div>
+
+          <div id="auth-status-msg" class="status-msg"></div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" id="cancel-settings-btn" class="btn btn-sm">Abbrechen</button>
+        <button type="button" id="save-config-btn" class="btn btn-primary btn-sm">💾 Speichern</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Live Logs & Progress Modal (📜) -->
+  <div id="logs-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-dialog modal-dialog-lg">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-icon">📜</span>
+          <h2>Echtzeit-Terminal & Logs</h2>
+        </div>
+        <button type="button" id="close-logs-btn" class="btn-modal-close" title="Schließen">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Live Progress Bar -->
+        <div class="log-progress-section">
+          <div class="progress-header">
+            <span id="burn-stage-text" class="progress-stage">Bereit</span>
+            <span id="burn-pct-text" class="progress-pct">0%</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div id="burn-progress-fill" class="progress-bar-fill"></div>
+          </div>
+          <div id="burn-detail-text" class="progress-track-info">Kein aktiver Vorgang</div>
+        </div>
+
+        <!-- Terminal Console -->
+        <div class="terminal-toolbar">
+          <span class="terminal-title">Live Pipeline Output</span>
+          <div class="terminal-actions">
+            <label class="checkbox-label" style="font-size: 0.72rem;">
+              <input type="checkbox" id="autoscroll-checkbox" checked />
+              Auto-Scroll
+            </label>
+            <button type="button" id="clear-logs-btn" class="btn btn-sm">Clear</button>
+          </div>
+        </div>
+
+        <div id="console-window" class="console-window">
+          <div class="log-line">
+            <span class="log-time">[Ready]</span>
+            <span class="log-level info">INFO</span>
+            <span class="log-msg">SpotyBurn Desktop initialisiert. Bereit für Ingestion.</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" id="close-logs-footer-btn" class="btn btn-sm">Schließen</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

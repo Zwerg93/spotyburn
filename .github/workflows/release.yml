@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag name (e.g. v0.1.0)'
+        required: false
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Package (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macOS-Universal
+            os: macos-latest
+            target: universal-apple-darwin
+          - name: Windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: Linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.os == 'macos-latest' && 'x86_64-apple-darwin aarch64-apple-darwin' || matrix.platform.target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            squashfs-tools \
+            wodim \
+            xorriso
+
+      - name: Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Prepare Sidecars (FFmpeg & yt-dlp)
+        shell: bash
+        run: |
+          mkdir -p src-tauri/bin
+          echo "=== Sidecar Staging Directory Prepared ==="
+          ls -la src-tauri/bin
+          echo "Target platform: ${{ matrix.platform.target }}"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      - name: Build and Bundle (macOS Universal)
+        if: matrix.platform.os == 'macos-latest'
+        run: |
+          cargo tauri build --target universal-apple-darwin
+
+      - name: Build and Bundle (Windows / Linux)
+        if: matrix.platform.os != 'macos-latest'
+        run: |
+          cargo tauri build
+
+      - name: Compute SHA256 Checksums
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          echo "Finding generated bundles..."
+          find src-tauri/target -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*.AppImage" -o -name "*.deb" -o -name "spotyburn.exe" \) -exec cp {} release-assets/ \;
+          cd release-assets
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum * > SHA256SUMS.txt
+          else
+            shasum -a 256 * > SHA256SUMS.txt
+          fi
+          echo "Checksums generated:"
+          cat SHA256SUMS.txt
+
+      - name: Upload Artifacts to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          files: |
+            release-assets/*
+          tag_name: ${{ github.ref_name || inputs.tag_name }}
+          name: SpotyBurn ${{ github.ref_name || inputs.tag_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
