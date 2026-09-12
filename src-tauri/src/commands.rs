@@ -159,6 +159,7 @@ pub async fn spotify_login() -> Result<UserProfile, String> {
         .map_err(|e| e.to_string())?;
 
     config.refresh_token = Some(tokens.refresh_token);
+    config.user_access_token = Some(tokens.access_token);
     config.user_display_name = Some(profile.display_name.clone());
     let _ = config.save();
 
@@ -169,6 +170,7 @@ pub async fn spotify_login() -> Result<UserProfile, String> {
 pub async fn spotify_logout() -> Result<(), String> {
     let mut config = AppConfig::load().unwrap_or_default();
     config.refresh_token = None;
+    config.user_access_token = None;
     config.user_display_name = None;
     config.save().map_err(|e| e.to_string())?;
     Ok(())

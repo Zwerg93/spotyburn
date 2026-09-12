@@ -9,7 +9,7 @@ pub const SPOTIFY_TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 pub const SPOTIFY_AUTH_URL: &str = "https://accounts.spotify.com/authorize";
 pub const SPOTIFY_OAUTH_PORT: u16 = 8888;
 pub const SPOTIFY_OAUTH_SCOPES: &str =
-    "playlist-read-private playlist-read-collaborative user-library-read";
+    "playlist-read-private playlist-read-collaborative user-library-read user-read-private user-read-email";
 const EXPIRY_BUFFER_SECS: u64 = 60;
 
 #[derive(Error, Debug)]
@@ -29,6 +29,8 @@ pub enum SpotifyError {
     InvalidResource(String),
     #[error("Resource not found: {0}")]
     NotFound(String),
+    #[error("Parse error: {0}")]
+    Parse(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +458,213 @@ pub fn extract_query_param(request: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+pub fn extract_next_data_json(html: &str) -> Option<&str> {
+    let marker = r#"id="__NEXT_DATA__""#;
+    let marker_pos = html.find(marker)?;
+    let tag_close = html[marker_pos..].find('>')?;
+    let json_start = marker_pos + tag_close + 1;
+    let json_end = html[json_start..].find("</script>")?;
+    Some(html[json_start..json_start + json_end].trim())
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedRoot {
+    props: Option<EmbedProps>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedProps {
+    #[serde(rename = "pageProps")]
+    page_props: Option<EmbedPageProps>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedPageProps {
+    state: Option<EmbedState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedState {
+    data: Option<EmbedData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedData {
+    entity: Option<EmbedEntity>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedEntity {
+    #[serde(rename = "type")]
+    entity_type: Option<String>,
+    name: Option<String>,
+    title: Option<String>,
+    uri: Option<String>,
+    id: Option<String>,
+    artists: Option<Vec<EmbedArtist>>,
+    subtitle: Option<String>,
+    duration: Option<u64>,
+    #[serde(rename = "trackList", default)]
+    track_list: Vec<EmbedTrackItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedTrackItem {
+    uri: Option<String>,
+    title: Option<String>,
+    name: Option<String>,
+    artists: Option<Vec<EmbedArtist>>,
+    subtitle: Option<String>,
+    album: Option<EmbedAlbumRef>,
+    duration: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedArtist {
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedAlbumRef {
+    name: Option<String>,
+}
+
+pub fn parse_embed_tracks(html: &str) -> Result<Vec<SpotifyTrack>, SpotifyError> {
+    let json_str = extract_next_data_json(html).ok_or_else(|| {
+        SpotifyError::Parse("Could not find __NEXT_DATA__ script in embed HTML".to_string())
+    })?;
+
+    let root: EmbedRoot = serde_json::from_str(json_str)
+        .map_err(|e| SpotifyError::Parse(format!("Failed to parse embed JSON: {}", e)))?;
+
+    let entity = root
+        .props
+        .and_then(|p| p.page_props)
+        .and_then(|pp| pp.state)
+        .and_then(|s| s.data)
+        .and_then(|d| d.entity)
+        .ok_or_else(|| SpotifyError::Parse("Missing entity in embed JSON".to_string()))?;
+
+    let entity_type = entity.entity_type.unwrap_or_default();
+    let album_or_playlist_name = entity
+        .name
+        .as_deref()
+        .or(entity.title.as_deref())
+        .unwrap_or_default()
+        .to_string();
+
+    let mut tracks = Vec::new();
+
+    if entity_type == "track" {
+        let uri = entity.uri.unwrap_or_default();
+        let id = entity.id.unwrap_or_else(|| {
+            uri.strip_prefix("spotify:track:")
+                .unwrap_or(&uri)
+                .to_string()
+        });
+        let title = entity
+            .title
+            .or(entity.name)
+            .unwrap_or_else(|| "Unknown Track".to_string());
+
+        let mut artists = Vec::new();
+        if let Some(artist_arr) = entity.artists {
+            for a in artist_arr {
+                if let Some(name) = a.name {
+                    let trimmed = name.trim();
+                    if !trimmed.is_empty() {
+                        artists.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        if artists.is_empty() {
+            if let Some(subtitle) = entity.subtitle {
+                let clean = subtitle.replace('\u{00A0}', " ");
+                artists = clean
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+        }
+        let duration_ms = entity.duration.unwrap_or(0);
+        tracks.push(SpotifyTrack {
+            id,
+            title,
+            artists,
+            album: album_or_playlist_name,
+            duration_ms,
+            track_number: 1,
+            isrc: None,
+        });
+        return Ok(tracks);
+    }
+
+    for (idx, item) in entity.track_list.into_iter().enumerate() {
+        let uri = item.uri.unwrap_or_default();
+        let id = uri
+            .strip_prefix("spotify:track:")
+            .unwrap_or(&uri)
+            .trim()
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let title = item
+            .title
+            .or(item.name)
+            .unwrap_or_else(|| "Unknown Track".to_string());
+
+        let mut artists = Vec::new();
+        if let Some(arr) = item.artists {
+            for a in arr {
+                if let Some(name) = a.name {
+                    let trimmed = name.trim();
+                    if !trimmed.is_empty() {
+                        artists.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        if artists.is_empty() {
+            if let Some(subtitle) = item.subtitle {
+                let clean = subtitle.replace('\u{00A0}', " ");
+                artists = clean
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+        }
+
+        let album = item
+            .album
+            .and_then(|a| a.name)
+            .unwrap_or_else(|| album_or_playlist_name.clone());
+
+        let duration_ms = item.duration.unwrap_or(0);
+
+        tracks.push(SpotifyTrack {
+            id,
+            title,
+            artists,
+            album,
+            duration_ms,
+            track_number: (idx + 1) as u32,
+            isrc: None,
+        });
+    }
+
+    if tracks.is_empty() {
+        return Err(SpotifyError::Parse(
+            "No tracks found in embed entity".to_string(),
+        ));
+    }
+
+    Ok(tracks)
 }
 
 pub async fn start_oauth_loopback(
@@ -948,11 +1157,87 @@ impl SpotifyClient {
         }
     }
 
+    pub async fn fetch_playlist_embed(
+        &self,
+        playlist_id: &str,
+    ) -> Result<Vec<SpotifyTrack>, SpotifyError> {
+        let url = format!("https://open.spotify.com/embed/playlist/{}", playlist_id);
+        let resp = self
+            .client
+            .get(&url)
+            .header(
+                reqwest::header::USER_AGENT,
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(SpotifyError::Api {
+                status: resp.status(),
+                message: format!("Failed to fetch embed page for playlist {}", playlist_id),
+            });
+        }
+        let html = resp.text().await?;
+        parse_embed_tracks(&html)
+    }
+
+    pub async fn fetch_album_embed(
+        &self,
+        album_id: &str,
+    ) -> Result<Vec<SpotifyTrack>, SpotifyError> {
+        let url = format!("https://open.spotify.com/embed/album/{}", album_id);
+        let resp = self
+            .client
+            .get(&url)
+            .header(
+                reqwest::header::USER_AGENT,
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(SpotifyError::Api {
+                status: resp.status(),
+                message: format!("Failed to fetch embed page for album {}", album_id),
+            });
+        }
+        let html = resp.text().await?;
+        parse_embed_tracks(&html)
+    }
+
+    pub async fn fetch_track_embed(&self, track_id: &str) -> Result<SpotifyTrack, SpotifyError> {
+        let url = format!("https://open.spotify.com/embed/track/{}", track_id);
+        let resp = self
+            .client
+            .get(&url)
+            .header(
+                reqwest::header::USER_AGENT,
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(SpotifyError::Api {
+                status: resp.status(),
+                message: format!("Failed to fetch embed page for track {}", track_id),
+            });
+        }
+        let html = resp.text().await?;
+        let tracks = parse_embed_tracks(&html)?;
+        tracks
+            .into_iter()
+            .next()
+            .ok_or_else(|| SpotifyError::NotFound(format!("Track {} not found in embed", track_id)))
+    }
+
     pub async fn fetch_playlist(
         &self,
         playlist_id: &str,
     ) -> Result<Vec<SpotifyTrack>, SpotifyError> {
-        let mut token = self.get_effective_token().await?;
+        let mut token = match self.get_effective_token().await {
+            Ok(t) => t,
+            Err(_) => return self.fetch_playlist_embed(playlist_id).await,
+        };
         let mut tracks = Vec::new();
         let mut next_url = Some(format!(
             "{}/playlists/{}/tracks?limit=100&offset=0&additional_types=track",
@@ -970,13 +1255,26 @@ impl SpotifyClient {
             }
 
             let status = resp.status();
+            if status == reqwest::StatusCode::FORBIDDEN {
+                return self.fetch_playlist_embed(playlist_id).await;
+            }
             if status == reqwest::StatusCode::NOT_FOUND {
+                if let Ok(embed_tracks) = self.fetch_playlist_embed(playlist_id).await {
+                    if !embed_tracks.is_empty() {
+                        return Ok(embed_tracks);
+                    }
+                }
                 return Err(SpotifyError::NotFound(format!(
                     "Playlist {} not found",
                     playlist_id
                 )));
             }
             if !status.is_success() {
+                if let Ok(embed_tracks) = self.fetch_playlist_embed(playlist_id).await {
+                    if !embed_tracks.is_empty() {
+                        return Ok(embed_tracks);
+                    }
+                }
                 let body = resp.text().await.unwrap_or_default();
                 return Err(SpotifyError::Api {
                     status,
@@ -1058,11 +1356,22 @@ impl SpotifyClient {
             next_url = page.next;
         }
 
+        if tracks.is_empty() {
+            if let Ok(embed_tracks) = self.fetch_playlist_embed(playlist_id).await {
+                if !embed_tracks.is_empty() {
+                    return Ok(embed_tracks);
+                }
+            }
+        }
+
         Ok(tracks)
     }
 
     pub async fn fetch_album(&self, album_id: &str) -> Result<Vec<SpotifyTrack>, SpotifyError> {
-        let mut token = self.get_effective_token().await?;
+        let mut token = match self.get_effective_token().await {
+            Ok(t) => t,
+            Err(_) => return self.fetch_album_embed(album_id).await,
+        };
         let url = format!("{}/albums/{}", self.api_base_url, album_id);
 
         let mut resp = self.client.get(&url).bearer_auth(&token).send().await?;
@@ -1074,13 +1383,26 @@ impl SpotifyClient {
         }
 
         let status = resp.status();
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return self.fetch_album_embed(album_id).await;
+        }
         if status == reqwest::StatusCode::NOT_FOUND {
+            if let Ok(embed_tracks) = self.fetch_album_embed(album_id).await {
+                if !embed_tracks.is_empty() {
+                    return Ok(embed_tracks);
+                }
+            }
             return Err(SpotifyError::NotFound(format!(
                 "Album {} not found",
                 album_id
             )));
         }
         if !status.is_success() {
+            if let Ok(embed_tracks) = self.fetch_album_embed(album_id).await {
+                if !embed_tracks.is_empty() {
+                    return Ok(embed_tracks);
+                }
+            }
             let body = resp.text().await.unwrap_or_default();
             return Err(SpotifyError::Api {
                 status,
@@ -1148,11 +1470,22 @@ impl SpotifyClient {
             next_url = page.next;
         }
 
+        if tracks.is_empty() {
+            if let Ok(embed_tracks) = self.fetch_album_embed(album_id).await {
+                if !embed_tracks.is_empty() {
+                    return Ok(embed_tracks);
+                }
+            }
+        }
+
         Ok(tracks)
     }
 
     pub async fn fetch_track(&self, track_id: &str) -> Result<SpotifyTrack, SpotifyError> {
-        let mut token = self.get_effective_token().await?;
+        let mut token = match self.get_effective_token().await {
+            Ok(t) => t,
+            Err(_) => return self.fetch_track_embed(track_id).await,
+        };
         let url = format!("{}/tracks/{}", self.api_base_url, track_id);
 
         let mut resp = self.client.get(&url).bearer_auth(&token).send().await?;
@@ -1164,13 +1497,22 @@ impl SpotifyClient {
         }
 
         let status = resp.status();
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return self.fetch_track_embed(track_id).await;
+        }
         if status == reqwest::StatusCode::NOT_FOUND {
+            if let Ok(track) = self.fetch_track_embed(track_id).await {
+                return Ok(track);
+            }
             return Err(SpotifyError::NotFound(format!(
                 "Track {} not found",
                 track_id
             )));
         }
         if !status.is_success() {
+            if let Ok(track) = self.fetch_track_embed(track_id).await {
+                return Ok(track);
+            }
             let body = resp.text().await.unwrap_or_default();
             return Err(SpotifyError::Api {
                 status,
@@ -2193,5 +2535,115 @@ mod tests {
             .expect("fallback search succeeded");
         assert_eq!(res2.tracks.len(), 1);
         assert_eq!(res2.tracks[0].id, "trk_fallback");
+    }
+
+    #[test]
+    fn test_extract_next_data_json() {
+        let html = r#"<html><head><script id="__NEXT_DATA__" type="application/json">{"props":{"test":123}}</script></head><body></body></html>"#;
+        let json = extract_next_data_json(html);
+        assert_eq!(json, Some(r#"{"props":{"test":123}}"#));
+
+        let missing = "<html><body>no script</body></html>";
+        assert_eq!(extract_next_data_json(missing), None);
+    }
+
+    #[test]
+    fn test_parse_embed_tracks_playlist() {
+        let sample_html = r#"
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <script id="__NEXT_DATA__" type="application/json">
+          {
+            "props": {
+              "pageProps": {
+                "state": {
+                  "data": {
+                    "entity": {
+                      "type": "playlist",
+                      "name": "Cool 80s Hits",
+                      "trackList": [
+                        {
+                          "uri": "spotify:track:4cOdK2wGLETKBW3PvgPWqT",
+                          "title": "Never Gonna Give You Up",
+                          "subtitle": "Rick Astley",
+                          "duration": 213573
+                        },
+                        {
+                          "uri": "spotify:track:11dFghVXANMlKmJXsNCbNl",
+                          "title": "Take On Me",
+                          "subtitle": "a-ha,\u00a0Magne Furuholmen",
+                          "duration": 225280
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+          </script>
+        </head>
+        <body></body>
+        </html>
+        "#;
+
+        let tracks = parse_embed_tracks(sample_html).expect("parsed embed tracks");
+        assert_eq!(tracks.len(), 2);
+
+        assert_eq!(tracks[0].id, "4cOdK2wGLETKBW3PvgPWqT");
+        assert_eq!(tracks[0].title, "Never Gonna Give You Up");
+        assert_eq!(tracks[0].artists, vec!["Rick Astley"]);
+        assert_eq!(tracks[0].album, "Cool 80s Hits");
+        assert_eq!(tracks[0].duration_ms, 213573);
+        assert_eq!(tracks[0].track_number, 1);
+
+        assert_eq!(tracks[1].id, "11dFghVXANMlKmJXsNCbNl");
+        assert_eq!(tracks[1].title, "Take On Me");
+        assert_eq!(tracks[1].artists, vec!["a-ha", "Magne Furuholmen"]);
+        assert_eq!(tracks[1].album, "Cool 80s Hits");
+        assert_eq!(tracks[1].duration_ms, 225280);
+        assert_eq!(tracks[1].track_number, 2);
+    }
+
+    #[test]
+    fn test_parse_embed_tracks_single_track() {
+        let sample_html = r#"
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <script id="__NEXT_DATA__" type="application/json">
+          {
+            "props": {
+              "pageProps": {
+                "state": {
+                  "data": {
+                    "entity": {
+                      "type": "track",
+                      "id": "3h5T5JypYU7huFiVYhv1dr",
+                      "title": "BbY WOW",
+                      "artists": [
+                        { "name": "KAROL G" },
+                        { "name": "Judeline" }
+                      ],
+                      "duration": 225834
+                    }
+                  }
+                }
+              }
+            }
+          }
+          </script>
+        </head>
+        <body></body>
+        </html>
+        "#;
+
+        let tracks = parse_embed_tracks(sample_html).expect("parsed embed track");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "3h5T5JypYU7huFiVYhv1dr");
+        assert_eq!(tracks[0].title, "BbY WOW");
+        assert_eq!(tracks[0].artists, vec!["KAROL G", "Judeline"]);
+        assert_eq!(tracks[0].duration_ms, 225834);
     }
 }
