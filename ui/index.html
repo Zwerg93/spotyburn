@@ -116,6 +116,7 @@
               <button type="button" class="search-tab" data-tab="tracks">Tracks</button>
               <button type="button" class="search-tab" data-tab="albums">Alben</button>
               <button type="button" class="search-tab" data-tab="playlists">Playlists</button>
+              <button type="button" id="add-all-search-tracks-btn" class="btn btn-sm btn-primary btn-add-all" style="display: none; margin-left: auto;">+ Alle Tracks hinzufügen</button>
             </div>
             <div id="search-results-list" class="search-results-list"></div>
           </div>
@@ -296,6 +297,19 @@
           </div>
         </div>
 
+        <!-- Destination / Export Folder Selection -->
+        <div class="destination-folder-bar">
+          <div class="dest-folder-info">
+            <span class="dest-folder-icon">📁</span>
+            <span class="dest-folder-label">Download- & Zielordner:</span>
+            <span id="current-dest-folder" class="dest-folder-path" title="Klicke auf 'Ordner wählen' um den Speicherort zu ändern">Wird geladen...</span>
+          </div>
+          <div class="dest-folder-actions">
+            <button type="button" id="choose-dest-folder-btn" class="btn btn-sm btn-primary">📁 Ordner wählen...</button>
+            <button type="button" id="open-dest-folder-btn" class="btn btn-sm" title="Im Finder / Explorer öffnen">🔍 Öffnen</button>
+          </div>
+        </div>
+
         <!-- Action Button (Dynamic Burn vs Export) -->
         <div class="action-btn-row">
           <button type="button" id="start-burn-btn" class="btn btn-action-burn">
@@ -341,7 +355,8 @@
             <label for="cache-dir-input">Cache- & Export-Verzeichnis</label>
             <div class="input-with-action">
               <input type="text" id="cache-dir-input" class="input-field" placeholder="~/.spotyburn/cache" spellcheck="false" />
-              <button type="button" id="modal-open-cache-btn" class="btn btn-sm" title="Im Dateimanager öffnen">📂 Ordner öffnen</button>
+              <button type="button" id="modal-choose-cache-btn" class="btn btn-sm btn-primary" title="Ordner im Dateisystem wählen">📁 Wählen...</button>
+              <button type="button" id="modal-open-cache-btn" class="btn btn-sm" title="Im Dateimanager öffnen">🔍 Öffnen</button>
             </div>
           </div>
 

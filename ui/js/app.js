@@ -60,12 +60,14 @@ function initElements() {
   elements.sidebarLoginBtn = document.getElementById("sidebar-login-btn");
 
   // Ingestion: Search & URL
+  elements.searchContainer = document.querySelector(".search-container");
   elements.spotifySearchInput = document.getElementById("spotify-search-input");
   elements.clearSearchBtn = document.getElementById("clear-search-btn");
   elements.searchSpinner = document.getElementById("search-spinner");
   elements.searchDropdown = document.getElementById("search-dropdown");
   elements.searchResultsList = document.getElementById("search-results-list");
   elements.searchTabs = document.querySelectorAll(".search-tab");
+  elements.addAllSearchTracksBtn = document.getElementById("add-all-search-tracks-btn");
 
   elements.toggleUrlBtn = document.getElementById("toggle-url-btn");
   elements.urlToggleChevron = document.getElementById("url-toggle-chevron");
@@ -73,6 +75,11 @@ function initElements() {
   elements.spotifyUrlInput = document.getElementById("spotify-url-input");
   elements.fetchTracksBtn = document.getElementById("fetch-tracks-btn");
   elements.fetchStatusMsg = document.getElementById("fetch-status-msg");
+
+  // Destination Folder Elements
+  elements.currentDestFolder = document.getElementById("current-dest-folder");
+  elements.chooseDestFolderBtn = document.getElementById("choose-dest-folder-btn");
+  elements.openDestFolderBtn = document.getElementById("open-dest-folder-btn");
 
   // Capacity Meter Elements
   elements.capacityModeTitle = document.getElementById("capacity-mode-title");
@@ -122,6 +129,7 @@ function initElements() {
   elements.clientSecretInput = document.getElementById("client-secret-input");
   elements.toggleSecretBtn = document.getElementById("toggle-secret-btn");
   elements.cacheDirInput = document.getElementById("cache-dir-input");
+  elements.modalChooseCacheBtn = document.getElementById("modal-choose-cache-btn");
   elements.modalOpenCacheBtn = document.getElementById("modal-open-cache-btn");
   elements.saveConfigBtn = document.getElementById("save-config-btn");
   elements.authStatusMsg = document.getElementById("auth-status-msg");
@@ -565,6 +573,25 @@ function setupSearchHandlers() {
     });
   });
 
+  // Bulk add all tracks from current search results
+  elements.addAllSearchTracksBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const tracksToAdd = (state.searchResults.tracks || []).filter(
+      (t) => !state.tracks.some((st) => st.id === t.id)
+    );
+    if (tracksToAdd.length === 0) return;
+
+    tracksToAdd.forEach((t) => {
+      state.tracks.push(t);
+      state.selectedTrackIds.add(t.id);
+    });
+
+    renderTracksTable();
+    updateCapacityMeter();
+    renderSearchResults();
+    logMessage("success", `✓ ${tracksToAdd.length} Tracks zur Brennliste hinzugefügt.`);
+  });
+
   // Close dropdown on click outside
   document.addEventListener("click", (e) => {
     if (!elements.searchContainer?.contains(e.target) && !elements.searchDropdown?.contains(e.target)) {
@@ -608,8 +635,30 @@ function renderSearchResults() {
 
   const totalResults = tracks.length + albums.length + playlists.length;
   if (totalResults === 0) {
+    if (elements.addAllSearchTracksBtn) elements.addAllSearchTracksBtn.style.display = "none";
     container.innerHTML = `<div class="search-empty">Keine Ergebnisse für diese Suche gefunden.</div>`;
     return;
+  }
+
+  // Update "+ Alle Tracks hinzufügen" button in search tabs
+  if (elements.addAllSearchTracksBtn) {
+    if (tracks.length > 0 && (tab === "all" || tab === "tracks")) {
+      elements.addAllSearchTracksBtn.style.display = "inline-flex";
+      const unaddedTracks = tracks.filter((t) => !state.tracks.some((st) => st.id === t.id));
+      if (unaddedTracks.length === 0) {
+        elements.addAllSearchTracksBtn.textContent = "✓ Alle hinzugefügt";
+        elements.addAllSearchTracksBtn.disabled = true;
+        elements.addAllSearchTracksBtn.classList.add("btn-added");
+        elements.addAllSearchTracksBtn.classList.remove("btn-primary");
+      } else {
+        elements.addAllSearchTracksBtn.textContent = `+ Alle Tracks (${unaddedTracks.length})`;
+        elements.addAllSearchTracksBtn.disabled = false;
+        elements.addAllSearchTracksBtn.classList.remove("btn-added");
+        elements.addAllSearchTracksBtn.classList.add("btn-primary");
+      }
+    } else {
+      elements.addAllSearchTracksBtn.style.display = "none";
+    }
   }
 
   // Render Tracks
@@ -618,6 +667,7 @@ function renderSearchResults() {
     item.className = "search-item";
     const artists = track.artists?.join(", ") || "Unknown Artist";
     const duration = formatDurationMs(track.duration_ms);
+    const isAdded = state.tracks.some((t) => t.id === track.id);
 
     item.innerHTML = `
       <div class="search-item-left">
@@ -628,13 +678,34 @@ function renderSearchResults() {
         </div>
       </div>
       <div class="search-item-btn">
-        <button type="button" class="btn btn-primary btn-sm">+ Hinzufügen</button>
+        <button type="button" class="btn btn-sm ${isAdded ? "btn-added" : "btn-primary"}" ${isAdded ? "disabled" : ""}>
+          ${isAdded ? "✓ Hinzugefügt" : "+ Hinzufügen"}
+        </button>
       </div>
     `;
 
-    item.querySelector("button").addEventListener("click", (e) => {
+    const btn = item.querySelector("button");
+    btn.addEventListener("click", (e) => {
       e.stopPropagation();
+      if (state.tracks.some((t) => t.id === track.id)) return;
       addSingleTrack(track);
+      btn.textContent = "✓ Hinzugefügt";
+      btn.classList.remove("btn-primary");
+      btn.classList.add("btn-added");
+      btn.disabled = true;
+
+      // Also update "Alle hinzufügen" button
+      if (elements.addAllSearchTracksBtn && (state.activeSearchTab === "all" || state.activeSearchTab === "tracks")) {
+        const remaining = (state.searchResults.tracks || []).filter((t) => !state.tracks.some((st) => st.id === t.id)).length;
+        if (remaining === 0) {
+          elements.addAllSearchTracksBtn.textContent = "✓ Alle hinzugefügt";
+          elements.addAllSearchTracksBtn.disabled = true;
+          elements.addAllSearchTracksBtn.classList.add("btn-added");
+          elements.addAllSearchTracksBtn.classList.remove("btn-primary");
+        } else {
+          elements.addAllSearchTracksBtn.textContent = `+ Alle Tracks (${remaining})`;
+        }
+      }
     });
 
     container.appendChild(item);
@@ -1224,6 +1295,15 @@ function setupModals() {
     }
   });
 
+  elements.openDestFolderBtn?.addEventListener("click", async () => {
+    try {
+      const opened = await callIpc("open_cache_folder");
+      logMessage("info", `Zielordner geöffnet: ${opened}`);
+    } catch (err) {
+      logMessage("error", `Ordner konnte nicht geöffnet werden: ${err}`);
+    }
+  });
+
   elements.openExportDirBtn?.addEventListener("click", async () => {
     try {
       const opened = await callIpc("open_cache_folder");
@@ -1232,6 +1312,10 @@ function setupModals() {
       logMessage("error", `Ordner konnte nicht geöffnet werden: ${err}`);
     }
   });
+
+  // Choose destination folder buttons
+  elements.chooseDestFolderBtn?.addEventListener("click", selectDestinationFolder);
+  elements.modalChooseCacheBtn?.addEventListener("click", selectDestinationFolder);
 
   // Toggle client secret password visibility
   elements.toggleSecretBtn?.addEventListener("click", () => {
@@ -1249,6 +1333,24 @@ function setupModals() {
   elements.saveConfigBtn?.addEventListener("click", saveConfig);
 }
 
+// Select Destination Folder via Native OS Dialog
+async function selectDestinationFolder() {
+  try {
+    const selected = await callIpc("select_destination_folder");
+    if (selected && selected.trim().length > 0) {
+      const cleanPath = selected.trim();
+      state.config.cache_dir = cleanPath;
+      if (elements.cacheDirInput) elements.cacheDirInput.value = cleanPath;
+      if (elements.currentDestFolder) elements.currentDestFolder.textContent = cleanPath;
+
+      await callIpc("save_config", { config: state.config });
+      logMessage("success", `✓ Download- & Zielordner festgelegt auf: ${cleanPath}`);
+    }
+  } catch (err) {
+    logMessage("error", `Ordnerauswahl fehlgeschlagen: ${err}`);
+  }
+}
+
 // Config Load / Save
 async function loadConfig() {
   try {
@@ -1257,6 +1359,9 @@ async function loadConfig() {
     if (elements.clientIdInput) elements.clientIdInput.value = config.client_id || "";
     if (elements.clientSecretInput) elements.clientSecretInput.value = config.client_secret || "";
     if (elements.cacheDirInput) elements.cacheDirInput.value = config.cache_dir || "";
+    if (elements.currentDestFolder) {
+      elements.currentDestFolder.textContent = config.cache_dir || "~/.spotyburn/cache";
+    }
     if (config.default_burn_mode && !state.burnMode) {
       setBurnMode(config.default_burn_mode);
     }
@@ -1280,6 +1385,9 @@ async function saveConfig() {
 
     await callIpc("save_config", { config: updated });
     state.config = updated;
+    if (elements.currentDestFolder) {
+      elements.currentDestFolder.textContent = updated.cache_dir || "~/.spotyburn/cache";
+    }
 
     elements.authStatusMsg.textContent = "✓ Konfiguration erfolgreich gespeichert!";
     elements.authStatusMsg.className = "status-msg success";

@@ -26,6 +26,7 @@ pub fn run() {
             commands::eject_drive,
             commands::start_burn_job,
             commands::open_cache_folder,
+            commands::select_destination_folder,
             commands::calculate_capacity,
         ])
         .run(tauri::generate_context!())

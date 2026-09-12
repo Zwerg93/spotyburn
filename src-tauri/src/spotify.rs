@@ -256,6 +256,7 @@ struct UserPlaylistItem {
     description: Option<String>,
     images: Option<Vec<SpotifyImageItem>>,
     tracks: Option<PlaylistTracksRef>,
+    items: Option<PlaylistTracksRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1240,10 +1241,12 @@ impl SpotifyClient {
             Err(_) => return self.fetch_playlist_embed(playlist_id).await,
         };
         let mut tracks = Vec::new();
+        // Try the modern Spotify /items endpoint first, fallback to /tracks
         let mut next_url = Some(format!(
-            "{}/playlists/{}/tracks?limit=100&offset=0&additional_types=track",
+            "{}/playlists/{}/items?limit=100&offset=0",
             self.api_base_url, playlist_id
         ));
+        let mut tried_tracks_endpoint = false;
 
         while let Some(url) = next_url {
             let mut resp = self.client.get(&url).bearer_auth(&token).send().await?;
@@ -1256,6 +1259,20 @@ impl SpotifyClient {
             }
 
             let status = resp.status();
+            if (status == reqwest::StatusCode::NOT_FOUND
+                || status == reqwest::StatusCode::FORBIDDEN
+                || status == reqwest::StatusCode::BAD_REQUEST)
+                && !tried_tracks_endpoint
+            {
+                // Fallback to older /tracks endpoint before embed
+                tried_tracks_endpoint = true;
+                next_url = Some(format!(
+                    "{}/playlists/{}/tracks?limit=100&offset=0&additional_types=track",
+                    self.api_base_url, playlist_id
+                ));
+                continue;
+            }
+
             if status == reqwest::StatusCode::FORBIDDEN {
                 return self.fetch_playlist_embed(playlist_id).await;
             }
@@ -1285,7 +1302,9 @@ impl SpotifyClient {
 
             let page: PlaylistTracksResponse = resp.json().await?;
             for item_val in page.items {
-                let track_obj = if item_val.get("track").is_some() && !item_val["track"].is_null() {
+                let track_obj = if item_val.get("item").is_some() && !item_val["item"].is_null() {
+                    &item_val["item"]
+                } else if item_val.get("track").is_some() && !item_val["track"].is_null() {
                     &item_val["track"]
                 } else {
                     &item_val
@@ -1566,7 +1585,12 @@ impl SpotifyClient {
                 let image_url = item
                     .images
                     .and_then(|imgs| imgs.into_iter().next().map(|i| i.url));
-                let track_count = item.tracks.and_then(|t| t.total).unwrap_or(0);
+                let track_count = item
+                    .items
+                    .as_ref()
+                    .or(item.tracks.as_ref())
+                    .and_then(|t| t.total)
+                    .unwrap_or(0);
                 let description = item.description.filter(|s| !s.is_empty());
 
                 playlists.push(SpotifyPlaylistSummary {

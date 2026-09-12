@@ -1128,8 +1128,68 @@ body {
   color: var(--text-secondary);
 }
 
-.export-info-text strong {
-  color: var(--text-primary);
+/* Destination Folder Bar */
+.destination-folder-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background-color: var(--bg-surface-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+}
+
+.dest-folder-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.dest-folder-icon {
+  font-size: 1.05rem;
+  flex-shrink: 0;
+}
+
+.dest-folder-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.dest-folder-path {
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  color: var(--accent-spotify);
+  background-color: var(--bg-input);
+  padding: 3px 8px;
+  border-radius: var(--radius-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 380px;
+}
+
+.dest-folder-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.btn-added {
+  background-color: rgba(16, 185, 129, 0.15) !important;
+  color: var(--status-emerald) !important;
+  border: 1px solid rgba(16, 185, 129, 0.3) !important;
+  cursor: default !important;
+}
+
+.btn-add-all {
+  font-size: 0.72rem !important;
+  padding: 3px 8px !important;
 }
 
 /* Action Button */

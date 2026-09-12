@@ -345,6 +345,71 @@ pub async fn open_cache_folder() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn select_destination_folder() -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg("POSIX path of (choose folder with prompt \"SpotyBurn: Zielordner auswählen\")")
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(Some(path));
+                }
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath }"])
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(Some(path));
+                }
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let output = std::process::Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--directory",
+                "--title=SpotyBurn: Zielordner auswählen",
+            ])
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(Some(path));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+pub fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[tauri::command]
 pub async fn start_burn_job(
     app: tauri::AppHandle,
     tracks: Vec<SpotifyTrack>,
@@ -491,70 +556,59 @@ async fn run_burn_pipeline(
             &format!("Downloading [{}/{}]: {}", track_num, total_tracks, desc),
         );
 
-        let wav_filename = format!("track_{:02}.wav", track_num);
+        let clean_artist = sanitize_filename(&artist_display);
+        let clean_title = sanitize_filename(&track.title);
+        let wav_filename = if clean_artist.is_empty() || clean_artist == "Unknown Artist" {
+            format!("{:02} - {}.wav", track_num, clean_title)
+        } else {
+            format!("{:02} - {} - {}.wav", track_num, clean_artist, clean_title)
+        };
         let wav_path = job_dir.join(&wav_filename);
 
-        if simulate {
-            // In simulate mode, write a dummy WAV header
-            let dummy_riff = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x02\x00\x44\xac\x00\x00\x10\xb1\x02\x00\x04\x00\x10\x00data\x00\x00\x00\x00";
-            if let Err(e) = std::fs::write(&wav_path, dummy_riff) {
-                let err_msg = format!("Simulated file write failed: {e}");
+        // Real sourcing via yt-dlp
+        let raw_file = match pipeline.match_and_download(track, &job_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                let err_msg = format!("Download failed for track '{}': {e}", track.title);
                 emit_log("error", &err_msg);
                 let _ = app.emit(
                     "burn-error",
                     BurnErrorPayload {
-                        stage: "Simulation".into(),
+                        stage: "Downloading".into(),
                         error: err_msg,
                     },
                 );
                 return;
             }
-        } else {
-            // Real sourcing via yt-dlp
-            let raw_file = match pipeline.match_and_download(track, &job_dir) {
-                Ok(p) => p,
-                Err(e) => {
-                    let err_msg = format!("Download failed for track '{}': {e}", track.title);
-                    emit_log("error", &err_msg);
-                    let _ = app.emit(
-                        "burn-error",
-                        BurnErrorPayload {
-                            stage: "Downloading".into(),
-                            error: err_msg,
-                        },
-                    );
-                    return;
-                }
-            };
+        };
 
-            let tc_pct = 30.0 + ((idx as f32) / (total_tracks as f32)) * 25.0;
-            emit_log(
-                "info",
-                &format!(
-                    "[{}/{}] Transcoding to Red Book 44.1kHz 16-bit PCM WAV...",
-                    track_num, total_tracks
-                ),
-            );
-            emit_progress(
-                "Transcoding",
-                tc_pct,
-                Some(track_num),
-                Some(total_tracks as u32),
-                &format!("Transcoding [{}/{}]: {}", track_num, total_tracks, desc),
-            );
+        let tc_pct = 30.0 + ((idx as f32) / (total_tracks as f32)) * 25.0;
+        emit_log(
+            "info",
+            &format!(
+                "[{}/{}] Transcoding to Red Book 44.1kHz 16-bit PCM WAV...",
+                track_num, total_tracks
+            ),
+        );
+        emit_progress(
+            "Transcoding",
+            tc_pct,
+            Some(track_num),
+            Some(total_tracks as u32),
+            &format!("Transcoding [{}/{}]: {}", track_num, total_tracks, desc),
+        );
 
-            if let Err(e) = pipeline.convert_to_redbook_wav(&raw_file, &wav_path, true) {
-                let err_msg = format!("Transcoding failed for track '{}': {e}", track.title);
-                emit_log("error", &err_msg);
-                let _ = app.emit(
-                    "burn-error",
-                    BurnErrorPayload {
-                        stage: "Transcoding".into(),
-                        error: err_msg,
-                    },
-                );
-                return;
-            }
+        if let Err(e) = pipeline.convert_to_redbook_wav(&raw_file, &wav_path, true) {
+            let err_msg = format!("Transcoding failed for track '{}': {e}", track.title);
+            emit_log("error", &err_msg);
+            let _ = app.emit(
+                "burn-error",
+                BurnErrorPayload {
+                    stage: "Transcoding".into(),
+                    error: err_msg,
+                },
+            );
+            return;
         }
 
         let mut track_item = TrackAudio::from_spotify_track(track, &wav_filename);
