@@ -119,7 +119,28 @@ pub async fn get_config() -> Result<AppConfig, String> {
 
 #[tauri::command]
 pub async fn save_config(config: AppConfig) -> Result<(), String> {
-    config.save().map_err(|e| e.to_string())
+    // Preserve auth tokens from the existing config if the incoming config doesn't include them.
+    // The frontend Settings modal only sends client_id, client_secret, cache_dir, default_burn_mode
+    // and would otherwise overwrite the persisted refresh_token/user_access_token/user_display_name
+    // with None, forcing the user to re-authenticate on every app restart.
+    let mut merged = config;
+    if merged.refresh_token.is_none()
+        || merged.user_access_token.is_none()
+        || merged.user_display_name.is_none()
+    {
+        if let Ok(existing) = AppConfig::load() {
+            if merged.refresh_token.is_none() {
+                merged.refresh_token = existing.refresh_token;
+            }
+            if merged.user_access_token.is_none() {
+                merged.user_access_token = existing.user_access_token;
+            }
+            if merged.user_display_name.is_none() {
+                merged.user_display_name = existing.user_display_name;
+            }
+        }
+    }
+    merged.save().map_err(|e| e.to_string())
 }
 
 fn get_spotify_credentials(config: &AppConfig) -> (String, String) {
