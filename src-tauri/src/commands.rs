@@ -527,7 +527,7 @@ async fn run_burn_pipeline(
         return;
     }
 
-    let pipeline = AudioPipeline::new();
+    let pipeline = std::sync::Arc::new(AudioPipeline::new());
     let mut audio_tracks = Vec::with_capacity(total_tracks);
 
     // 1. Download & Transcode Tracks
@@ -565,11 +565,30 @@ async fn run_burn_pipeline(
         };
         let wav_path = job_dir.join(&wav_filename);
 
-        // Real sourcing via yt-dlp
-        let raw_file = match pipeline.match_and_download(track, &job_dir) {
-            Ok(p) => p,
-            Err(e) => {
+        // Real sourcing via yt-dlp (run on blocking thread pool to not starve Tokio runtime)
+        let dl_pipeline = pipeline.clone();
+        let dl_track = track.clone();
+        let dl_dir = job_dir.clone();
+        let raw_file = match tokio::task::spawn_blocking(move || {
+            dl_pipeline.match_and_download(&dl_track, &dl_dir)
+        })
+        .await
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
                 let err_msg = format!("Download failed for track '{}': {e}", track.title);
+                emit_log("error", &err_msg);
+                let _ = app.emit(
+                    "burn-error",
+                    BurnErrorPayload {
+                        stage: "Downloading".into(),
+                        error: err_msg,
+                    },
+                );
+                return;
+            }
+            Err(e) => {
+                let err_msg = format!("Download task panicked for track '{}': {e}", track.title);
                 emit_log("error", &err_msg);
                 let _ = app.emit(
                     "burn-error",
@@ -598,17 +617,40 @@ async fn run_burn_pipeline(
             &format!("Transcoding [{}/{}]: {}", track_num, total_tracks, desc),
         );
 
-        if let Err(e) = pipeline.convert_to_redbook_wav(&raw_file, &wav_path, true) {
-            let err_msg = format!("Transcoding failed for track '{}': {e}", track.title);
-            emit_log("error", &err_msg);
-            let _ = app.emit(
-                "burn-error",
-                BurnErrorPayload {
-                    stage: "Transcoding".into(),
-                    error: err_msg,
-                },
-            );
-            return;
+        // Transcode on blocking thread pool
+        let tc_pipeline = pipeline.clone();
+        let tc_raw = raw_file.clone();
+        let tc_wav = wav_path.clone();
+        match tokio::task::spawn_blocking(move || {
+            tc_pipeline.convert_to_redbook_wav(&tc_raw, &tc_wav, true)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let err_msg = format!("Transcoding failed for track '{}': {e}", track.title);
+                emit_log("error", &err_msg);
+                let _ = app.emit(
+                    "burn-error",
+                    BurnErrorPayload {
+                        stage: "Transcoding".into(),
+                        error: err_msg,
+                    },
+                );
+                return;
+            }
+            Err(e) => {
+                let err_msg = format!("Transcode task panicked for track '{}': {e}", track.title);
+                emit_log("error", &err_msg);
+                let _ = app.emit(
+                    "burn-error",
+                    BurnErrorPayload {
+                        stage: "Transcoding".into(),
+                        error: err_msg,
+                    },
+                );
+                return;
+            }
         }
 
         let mut track_item = TrackAudio::from_spotify_track(track, &wav_filename);
