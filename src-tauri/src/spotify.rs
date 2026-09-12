@@ -321,7 +321,8 @@ pub fn build_search_url(base_url: &str, query: &str, types: &[&str], limit: u32)
     } else {
         types.join(",")
     };
-    let limit_val = if limit == 0 { 20 } else { limit.min(50) };
+    // Spotify Web API strictly caps search limit to max 10 (anything > 10 returns 400 Bad Request: "Invalid limit")
+    let limit_val = if limit == 0 { 10 } else { limit.clamp(1, 10) };
 
     let base = format!("{}/search", base_url.trim_end_matches('/'));
     let mut url = reqwest::Url::parse(&base)
@@ -2202,20 +2203,20 @@ mod tests {
         let base_url = "https://api.spotify.com/v1";
 
         // 1. Standard query with spaces and ampersand
-        let url1 = build_search_url(base_url, "Rock & Roll", &["track"], 20);
+        let url1 = build_search_url(base_url, "Rock & Roll", &["track"], 10);
         assert!(url1.contains("q=Rock+%26+Roll") || url1.contains("q=Rock%20%26%20Roll"));
         assert!(url1.contains("type=track"));
-        assert!(url1.contains("limit=20"));
+        assert!(url1.contains("limit=10"));
 
         // 2. Special characters, slashes, umlauts
         let url2 = build_search_url(
             base_url,
             "AC/DC - Über Hits 100%",
             &["track", "album"],
-            0, // Should default to 20
+            0, // Should default to 10
         );
         assert!(url2.contains("type=track%2Calbum"));
-        assert!(url2.contains("limit=20"));
+        assert!(url2.contains("limit=10"));
         // URL should parse cleanly
         let parsed = reqwest::Url::parse(&url2).expect("valid URL");
         let q_val = parsed.query_pairs().find(|(k, _)| k == "q").unwrap().1;
@@ -2224,7 +2225,7 @@ mod tests {
         // 3. Empty types should default to track,playlist,album
         let url3 = build_search_url(base_url, "Queen", &[], 100);
         assert!(url3.contains("type=track%2Cplaylist%2Calbum"));
-        assert!(url3.contains("limit=50")); // Clamped to 50
+        assert!(url3.contains("limit=10")); // Clamped to 10
     }
 
     #[test]

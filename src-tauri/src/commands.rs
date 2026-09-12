@@ -271,7 +271,7 @@ pub async fn search_spotify(
         _ => vec!["track", "playlist", "album"],
     };
 
-    let search_limit = limit.unwrap_or(20);
+    let search_limit = limit.unwrap_or(10).clamp(1, 10);
     client
         .search(trimmed, &types, search_limit)
         .await

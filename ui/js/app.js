@@ -585,7 +585,7 @@ async function performSearch(query) {
     const result = await callIpc("search_spotify", {
       query,
       searchType: "all",
-      limit: 15,
+      limit: 10,
     });
     state.searchResults = result || { tracks: [], albums: [], playlists: [] };
     renderSearchResults();
