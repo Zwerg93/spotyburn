@@ -122,19 +122,26 @@ pub async fn save_config(config: AppConfig) -> Result<(), String> {
     config.save().map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn spotify_login() -> Result<UserProfile, String> {
-    let mut config = AppConfig::load().unwrap_or_default();
+fn get_spotify_credentials(config: &AppConfig) -> (String, String) {
     let client_id = if !config.client_id.trim().is_empty() {
         config.client_id.trim().to_string()
     } else {
-        crate::config::DEFAULT_CLIENT_ID.to_string()
+        std::env::var("SPOTIFY_CLIENT_ID").unwrap_or_default()
     };
+
     let client_secret = if !config.client_secret.trim().is_empty() {
         config.client_secret.trim().to_string()
     } else {
-        crate::config::DEFAULT_CLIENT_SECRET.to_string()
+        std::env::var("SPOTIFY_CLIENT_SECRET").unwrap_or_default()
     };
+
+    (client_id, client_secret)
+}
+
+#[tauri::command]
+pub async fn spotify_login() -> Result<UserProfile, String> {
+    let mut config = AppConfig::load().unwrap_or_default();
+    let (client_id, client_secret) = get_spotify_credentials(&config);
 
     let tokens = crate::spotify::start_oauth_loopback(
         &client_id,
@@ -175,16 +182,7 @@ pub async fn get_user_profile() -> Result<Option<UserProfile>, String> {
         _ => return Ok(None),
     };
 
-    let client_id = if !config.client_id.trim().is_empty() {
-        config.client_id.trim().to_string()
-    } else {
-        crate::config::DEFAULT_CLIENT_ID.to_string()
-    };
-    let client_secret = if !config.client_secret.trim().is_empty() {
-        config.client_secret.trim().to_string()
-    } else {
-        crate::config::DEFAULT_CLIENT_SECRET.to_string()
-    };
+    let (client_id, client_secret) = get_spotify_credentials(&config);
 
     let client = SpotifyClient::with_refresh_token(client_id, client_secret, refresh_token);
     match client.fetch_current_user_profile().await {
@@ -201,16 +199,7 @@ pub async fn get_user_playlists() -> Result<Vec<SpotifyPlaylistSummary>, String>
         _ => return Err("Not logged in to Spotify".to_string()),
     };
 
-    let client_id = if !config.client_id.trim().is_empty() {
-        config.client_id.trim().to_string()
-    } else {
-        crate::config::DEFAULT_CLIENT_ID.to_string()
-    };
-    let client_secret = if !config.client_secret.trim().is_empty() {
-        config.client_secret.trim().to_string()
-    } else {
-        crate::config::DEFAULT_CLIENT_SECRET.to_string()
-    };
+    let (client_id, client_secret) = get_spotify_credentials(&config);
 
     let client = SpotifyClient::with_refresh_token(client_id, client_secret, refresh_token);
     client
@@ -227,19 +216,14 @@ pub async fn fetch_spotify_tracks(url: String) -> Result<SpotifyFetchResult, Str
     }
 
     let config = AppConfig::load().unwrap_or_default();
-    let client_id = if !config.client_id.trim().is_empty() {
-        config.client_id.trim().to_string()
-    } else {
-        crate::config::DEFAULT_CLIENT_ID.to_string()
-    };
+    let (client_id, client_secret) = get_spotify_credentials(&config);
 
-    let client_secret = if !config.client_secret.trim().is_empty() {
-        config.client_secret.trim().to_string()
-    } else {
-        crate::config::DEFAULT_CLIENT_SECRET.to_string()
-    };
-
-    let client = SpotifyClient::new(client_id, client_secret);
+    let client = SpotifyClient::with_tokens(
+        client_id,
+        client_secret,
+        config.refresh_token.clone(),
+        config.user_access_token.clone(),
+    );
     let tracks = client.fetch(trimmed).await.map_err(|e| e.to_string())?;
 
     let total_duration_ms: u64 = tracks.iter().map(|t| t.duration_ms).sum();
@@ -266,17 +250,7 @@ pub async fn search_spotify(
     }
 
     let config = AppConfig::load().unwrap_or_default();
-    let client_id = if !config.client_id.trim().is_empty() {
-        config.client_id.trim().to_string()
-    } else {
-        crate::config::DEFAULT_CLIENT_ID.to_string()
-    };
-
-    let client_secret = if !config.client_secret.trim().is_empty() {
-        config.client_secret.trim().to_string()
-    } else {
-        crate::config::DEFAULT_CLIENT_SECRET.to_string()
-    };
+    let (client_id, client_secret) = get_spotify_credentials(&config);
 
     let client = SpotifyClient::with_tokens(
         client_id,

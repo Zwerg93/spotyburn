@@ -9,3 +9,6 @@ Cargo.lock
 .env
 .env.*
 !.env.example
+
+# Agent Governance System
+.agent-system/

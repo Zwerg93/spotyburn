@@ -141,6 +141,12 @@ pub fn parse_spotify_uri(input: &str) -> Result<SpotifyResource, SpotifyError> {
         )));
     }
 
+    // Direct base62 Spotify ID (e.g. "37i9dQZF1DXcBWIGoYBM5M" or any 15-30 alphanumeric char ID)
+    let alphanumeric_only = trimmed.chars().all(|c| c.is_ascii_alphanumeric());
+    if alphanumeric_only && trimmed.len() >= 15 && trimmed.len() <= 35 {
+        return Ok(SpotifyResource::Playlist(trimmed.to_string()));
+    }
+
     Err(SpotifyError::InvalidResource(format!(
         "Unrecognized Spotify URL or URI: {}",
         input
@@ -163,13 +169,10 @@ struct TokenResponse {
 
 #[derive(Debug, Deserialize)]
 struct PlaylistTracksResponse {
-    items: Vec<PlaylistItem>,
+    #[serde(default)]
+    items: Vec<serde_json::Value>,
+    #[serde(default)]
     next: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PlaylistItem {
-    track: Option<FullTrackItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -949,15 +952,22 @@ impl SpotifyClient {
         &self,
         playlist_id: &str,
     ) -> Result<Vec<SpotifyTrack>, SpotifyError> {
-        let token = self.authenticate().await?;
+        let mut token = self.get_effective_token().await?;
         let mut tracks = Vec::new();
         let mut next_url = Some(format!(
-            "{}/playlists/{}/tracks?limit=100&offset=0",
+            "{}/playlists/{}/tracks?limit=100&offset=0&additional_types=track",
             self.api_base_url, playlist_id
         ));
 
         while let Some(url) = next_url {
-            let resp = self.client.get(&url).bearer_auth(&token).send().await?;
+            let mut resp = self.client.get(&url).bearer_auth(&token).send().await?;
+
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                if let Ok(new_token) = self.authenticate().await {
+                    token = new_token;
+                    resp = self.client.get(&url).bearer_auth(&token).send().await?;
+                }
+            }
 
             let status = resp.status();
             if status == reqwest::StatusCode::NOT_FOUND {
@@ -975,23 +985,74 @@ impl SpotifyClient {
             }
 
             let page: PlaylistTracksResponse = resp.json().await?;
-            for item in page.items {
-                if let Some(track) = item.track {
-                    if let Some(id) = track.id {
-                        let artists = track.artists.into_iter().map(|a| a.name).collect();
-                        let album = track.album.map(|a| a.name).unwrap_or_default();
-                        let isrc = track.external_ids.and_then(|e| e.isrc);
-                        tracks.push(SpotifyTrack {
-                            id,
-                            title: track.name,
-                            artists,
-                            album,
-                            duration_ms: track.duration_ms,
-                            track_number: track.track_number,
-                            isrc,
-                        });
-                    }
+            for item_val in page.items {
+                let track_obj = if item_val.get("track").is_some() && !item_val["track"].is_null() {
+                    &item_val["track"]
+                } else {
+                    &item_val
+                };
+
+                if track_obj.is_null() {
+                    continue;
                 }
+
+                let id = match track_obj.get("id").and_then(|v| v.as_str()) {
+                    Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+                    _ => continue,
+                };
+
+                let title = track_obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown Track")
+                    .to_string();
+
+                let artists: Vec<String> = track_obj
+                    .get("artists")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|a| {
+                                a.get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let album = track_obj
+                    .get("album")
+                    .and_then(|a| a.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let duration_ms = track_obj
+                    .get("duration_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let track_number = track_obj
+                    .get("track_number")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1) as u32;
+
+                let isrc = track_obj
+                    .get("external_ids")
+                    .and_then(|e| e.get("isrc"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                tracks.push(SpotifyTrack {
+                    id,
+                    title,
+                    artists,
+                    album,
+                    duration_ms,
+                    track_number,
+                    isrc,
+                });
             }
 
             next_url = page.next;
@@ -1001,10 +1062,16 @@ impl SpotifyClient {
     }
 
     pub async fn fetch_album(&self, album_id: &str) -> Result<Vec<SpotifyTrack>, SpotifyError> {
-        let token = self.authenticate().await?;
+        let mut token = self.get_effective_token().await?;
         let url = format!("{}/albums/{}", self.api_base_url, album_id);
 
-        let resp = self.client.get(&url).bearer_auth(&token).send().await?;
+        let mut resp = self.client.get(&url).bearer_auth(&token).send().await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Ok(new_token) = self.authenticate().await {
+                token = new_token;
+                resp = self.client.get(&url).bearer_auth(&token).send().await?;
+            }
+        }
 
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -1044,7 +1111,13 @@ impl SpotifyClient {
         // Follow pagination if album has > 50 tracks
         let mut next_url = album_data.tracks.next;
         while let Some(url) = next_url {
-            let resp = self.client.get(&url).bearer_auth(&token).send().await?;
+            let mut resp = self.client.get(&url).bearer_auth(&token).send().await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                if let Ok(new_token) = self.authenticate().await {
+                    token = new_token;
+                    resp = self.client.get(&url).bearer_auth(&token).send().await?;
+                }
+            }
 
             let status = resp.status();
             if !status.is_success() {
@@ -1079,10 +1152,16 @@ impl SpotifyClient {
     }
 
     pub async fn fetch_track(&self, track_id: &str) -> Result<SpotifyTrack, SpotifyError> {
-        let token = self.authenticate().await?;
+        let mut token = self.get_effective_token().await?;
         let url = format!("{}/tracks/{}", self.api_base_url, track_id);
 
-        let resp = self.client.get(&url).bearer_auth(&token).send().await?;
+        let mut resp = self.client.get(&url).bearer_auth(&token).send().await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Ok(new_token) = self.authenticate().await {
+                token = new_token;
+                resp = self.client.get(&url).bearer_auth(&token).send().await?;
+            }
+        }
 
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -1117,12 +1196,19 @@ impl SpotifyClient {
     }
 
     pub async fn fetch_user_playlists(&self) -> Result<Vec<SpotifyPlaylistSummary>, SpotifyError> {
-        let token = self.authenticate().await?;
+        let mut token = self.get_effective_token().await?;
         let mut playlists = Vec::new();
         let mut next_url = Some(format!("{}/me/playlists?limit=50", self.api_base_url));
 
         while let Some(url) = next_url {
-            let resp = self.client.get(&url).bearer_auth(&token).send().await?;
+            let mut resp = self.client.get(&url).bearer_auth(&token).send().await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                if let Ok(new_token) = self.authenticate().await {
+                    token = new_token;
+                    resp = self.client.get(&url).bearer_auth(&token).send().await?;
+                }
+            }
+
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
@@ -1156,10 +1242,17 @@ impl SpotifyClient {
     }
 
     pub async fn fetch_current_user_profile(&self) -> Result<UserProfile, SpotifyError> {
-        let token = self.authenticate().await?;
+        let mut token = self.get_effective_token().await?;
         let url = format!("{}/me", self.api_base_url);
 
-        let resp = self.client.get(&url).bearer_auth(&token).send().await?;
+        let mut resp = self.client.get(&url).bearer_auth(&token).send().await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Ok(new_token) = self.authenticate().await {
+                token = new_token;
+                resp = self.client.get(&url).bearer_auth(&token).send().await?;
+            }
+        }
+
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
