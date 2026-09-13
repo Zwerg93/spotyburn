@@ -70,6 +70,21 @@ impl AudioPipeline {
         }
     }
 
+    /// Converts an input audio file into an MP3 file with ID3 tags
+    pub fn convert_to_mp3(
+        &self,
+        input: &Path,
+        output: &Path,
+        bitrate_kbps: u32,
+        track: &SpotifyTrack,
+    ) -> Result<(), AudioError> {
+        if let Some(tr) = &self.transcoder {
+            tr.convert_to_mp3(input, output, bitrate_kbps, track)
+        } else {
+            audio::convert_to_mp3(input, output, bitrate_kbps, track)
+        }
+    }
+
     /// Generates a standard-compliant Red Book CUE-Sheet with CD-Text
     pub fn generate_cuesheet(
         &self,

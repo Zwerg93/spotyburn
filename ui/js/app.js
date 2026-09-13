@@ -80,6 +80,7 @@ function initElements() {
 
   // Destination Folder Elements
   elements.currentDestFolder = document.getElementById("current-dest-folder");
+  elements.destSubfolderInput = document.getElementById("dest-subfolder-input");
   elements.chooseDestFolderBtn = document.getElementById("choose-dest-folder-btn");
   elements.openDestFolderBtn = document.getElementById("open-dest-folder-btn");
 
@@ -738,6 +739,9 @@ function renderSearchResults() {
     item.querySelector("button").addEventListener("click", (e) => {
       e.stopPropagation();
       elements.searchDropdown.style.display = "none";
+      if (elements.destSubfolderInput && album.name) {
+        elements.destSubfolderInput.value = album.name;
+      }
       fetchTracksFromUri(`spotify:album:${album.id}`, album.name);
     });
 
@@ -768,6 +772,9 @@ function renderSearchResults() {
     item.querySelector("button").addEventListener("click", (e) => {
       e.stopPropagation();
       elements.searchDropdown.style.display = "none";
+      if (elements.destSubfolderInput && pl.name) {
+        elements.destSubfolderInput.value = pl.name;
+      }
       fetchTracksFromUri(`spotify:playlist:${pl.id}`, pl.name);
     });
 
@@ -800,6 +807,10 @@ async function fetchTracksFromUri(uri, name = "") {
     elements.fetchStatusMsg.textContent = `Lade "${name || uri}"...`;
     elements.fetchStatusMsg.className = "status-msg info";
     logMessage("info", `Rufe Tracks ab: ${name || uri}`);
+
+    if (name && elements.destSubfolderInput) {
+      elements.destSubfolderInput.value = name;
+    }
 
     const result = await callIpc("fetch_spotify_tracks", { url: uri });
     state.tracks = result.tracks || [];
@@ -1221,6 +1232,8 @@ async function startBurnJob() {
     `Starte Vorgang: ${selectedTracks.length} Tracks | Modus: ${state.burnMode} | Drive: ${driveId}`
   );
 
+  const folderName = elements.destSubfolderInput ? elements.destSubfolderInput.value.trim() : null;
+
   try {
     await callIpc("start_burn_job", {
       tracks: selectedTracks,
@@ -1229,6 +1242,7 @@ async function startBurnJob() {
       speed,
       ejectAfter,
       simulate,
+      folderName: folderName || null,
     });
     // Start active polling as fallback to ensure logs and progress always update in real time
     startBurnStatusPolling();

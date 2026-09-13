@@ -453,7 +453,39 @@ pub fn sanitize_filename(name: &str) -> String {
         .to_string()
 }
 
+pub fn resolve_target_folder_name(
+    folder_name: Option<&str>,
+    tracks: &[SpotifyTrack],
+    timestamp_ms: u128,
+) -> String {
+    if let Some(custom) = folder_name {
+        let clean = sanitize_filename(custom);
+        if !clean.is_empty() {
+            return clean;
+        }
+    }
+
+    if let Some(first_track) = tracks.first() {
+        let clean_album = sanitize_filename(&first_track.album);
+        if !clean_album.is_empty() {
+            return clean_album;
+        }
+        let artist = if first_track.artists.is_empty() {
+            "Unknown Artist".to_string()
+        } else {
+            first_track.artists.join(", ")
+        };
+        let clean_fallback = sanitize_filename(&format!("{} - {}", artist, first_track.title));
+        if !clean_fallback.is_empty() {
+            return clean_fallback;
+        }
+    }
+
+    format!("Export_{}", timestamp_ms)
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_burn_job(
     app: tauri::AppHandle,
     tracks: Vec<SpotifyTrack>,
@@ -462,6 +494,7 @@ pub async fn start_burn_job(
     speed: Option<u32>,
     eject_after: Option<bool>,
     simulate: Option<bool>,
+    folder_name: Option<String>,
 ) -> Result<String, String> {
     let mode = burn_mode.unwrap_or_default();
     let burn_speed = speed.unwrap_or(0);
@@ -484,6 +517,7 @@ pub async fn start_burn_job(
             burn_speed,
             eject,
             is_sim,
+            folder_name,
         )
         .await;
     });
@@ -491,6 +525,7 @@ pub async fn start_burn_job(
     Ok("Burn job started successfully".to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_burn_pipeline(
     app: tauri::AppHandle,
     tracks: Vec<SpotifyTrack>,
@@ -499,6 +534,7 @@ async fn run_burn_pipeline(
     speed: u32,
     eject_after: bool,
     simulate: bool,
+    folder_name: Option<String>,
 ) {
     let total_tracks = tracks.len();
     {
@@ -577,7 +613,13 @@ async fn run_burn_pipeline(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let job_dir: PathBuf = config.cache_dir.join(format!("job_{}", timestamp_ms));
+    let folder_base = resolve_target_folder_name(folder_name.as_deref(), &tracks, timestamp_ms);
+    let mut job_dir: PathBuf = config.cache_dir.join(&folder_base);
+    if job_dir.exists() {
+        job_dir = config
+            .cache_dir
+            .join(format!("{}_{}", folder_base, timestamp_ms));
+    }
 
     if let Err(e) = std::fs::create_dir_all(&job_dir) {
         let err_msg = format!("Failed to create workspace directory: {e}");
@@ -625,12 +667,20 @@ async fn run_burn_pipeline(
 
         let clean_artist = sanitize_filename(&artist_display);
         let clean_title = sanitize_filename(&track.title);
-        let wav_filename = if clean_artist.is_empty() || clean_artist == "Unknown Artist" {
-            format!("{:02} - {}.wav", track_num, clean_title)
+        let ext = if burn_mode == BurnMode::DataMp3Cd {
+            "mp3"
         } else {
-            format!("{:02} - {} - {}.wav", track_num, clean_artist, clean_title)
+            "wav"
         };
-        let wav_path = job_dir.join(&wav_filename);
+        let audio_filename = if clean_artist.is_empty() || clean_artist == "Unknown Artist" {
+            format!("{:02} - {}.{}", track_num, clean_title, ext)
+        } else {
+            format!(
+                "{:02} - {} - {}.{}",
+                track_num, clean_artist, clean_title, ext
+            )
+        };
+        let audio_path = job_dir.join(&audio_filename);
 
         // Real sourcing via yt-dlp (run on blocking thread pool to not starve Tokio runtime)
         let dl_pipeline = pipeline.clone();
@@ -665,12 +715,14 @@ async fn run_burn_pipeline(
         };
 
         let tc_pct = 30.0 + ((idx as f32) / (total_tracks as f32)) * 25.0;
+        let transcode_msg = if burn_mode == BurnMode::DataMp3Cd {
+            "Transcoding to MP3 320 kbps with ID3 tags..."
+        } else {
+            "Transcoding to Red Book 44.1kHz 16-bit PCM WAV..."
+        };
         emit_log(
             "info",
-            &format!(
-                "[{}/{}] Transcoding to Red Book 44.1kHz 16-bit PCM WAV...",
-                track_num, total_tracks
-            ),
+            &format!("[{}/{}] {}", track_num, total_tracks, transcode_msg),
         );
         emit_progress(
             "Transcoding",
@@ -683,15 +735,21 @@ async fn run_burn_pipeline(
         // Transcode on blocking thread pool
         let tc_pipeline = pipeline.clone();
         let tc_raw = raw_file.clone();
-        let tc_wav = wav_path.clone();
+        let tc_audio = audio_path.clone();
+        let tc_track = track.clone();
+        let tc_mode = burn_mode;
         match tokio::task::spawn_blocking(move || {
-            tc_pipeline.convert_to_redbook_wav(&tc_raw, &tc_wav, true)
+            if tc_mode == BurnMode::DataMp3Cd {
+                tc_pipeline.convert_to_mp3(&tc_raw, &tc_audio, 320, &tc_track)
+            } else {
+                tc_pipeline.convert_to_redbook_wav(&tc_raw, &tc_audio, true)
+            }
         })
         .await
         {
             Ok(Ok(())) => {
                 // Delete intermediate raw download file (e.g. .webm, .m4a) to keep folder clean
-                if raw_file != wav_path && raw_file.is_file() {
+                if raw_file != audio_path && raw_file.is_file() {
                     let _ = std::fs::remove_file(&raw_file);
                 }
             }
@@ -704,7 +762,7 @@ async fn run_burn_pipeline(
                     ),
                 );
                 // Clean up raw file if transcode failed
-                if raw_file != wav_path && raw_file.is_file() {
+                if raw_file != audio_path && raw_file.is_file() {
                     let _ = std::fs::remove_file(&raw_file);
                 }
                 continue;
@@ -717,50 +775,52 @@ async fn run_burn_pipeline(
                         track_num, total_tracks, track.title
                     ),
                 );
-                if raw_file != wav_path && raw_file.is_file() {
+                if raw_file != audio_path && raw_file.is_file() {
                     let _ = std::fs::remove_file(&raw_file);
                 }
                 continue;
             }
         }
 
-        let mut track_item = TrackAudio::from_spotify_track(track, &wav_filename);
+        let mut track_item = TrackAudio::from_spotify_track(track, &audio_filename);
         track_item.track_number = track_num;
         audio_tracks.push(track_item);
     }
 
-    // 2. Generate CUE Sheet
-    emit_log(
-        "info",
-        "Generating standard-compliant Red Book CUE sheet with CD-Text...",
-    );
-    emit_progress(
-        "CUE Generation",
-        58.0,
-        None,
-        Some(total_tracks as u32),
-        "Generating CUE sheet...",
-    );
-
+    // 2. Generate CUE Sheet (Audio CD / ExportOnly)
     let cue_path = job_dir.join("disc.cue");
-    if let Err(e) = cuesheet::generate_cuesheet(&audio_tracks, &cue_path) {
-        let err_msg = format!("CUE sheet generation failed: {e}");
-        emit_log("error", &err_msg);
-        let err_payload = BurnErrorPayload {
-            stage: "CUE Generation".into(),
-            error: err_msg,
-        };
-        if let Ok(mut status) = BURN_STATUS.write() {
-            status.is_active = false;
-            status.error = Some(err_payload.clone());
+    if burn_mode != BurnMode::DataMp3Cd {
+        emit_log(
+            "info",
+            "Generating standard-compliant Red Book CUE sheet with CD-Text...",
+        );
+        emit_progress(
+            "CUE Generation",
+            58.0,
+            None,
+            Some(total_tracks as u32),
+            "Generating CUE sheet...",
+        );
+
+        if let Err(e) = cuesheet::generate_cuesheet(&audio_tracks, &cue_path) {
+            let err_msg = format!("CUE sheet generation failed: {e}");
+            emit_log("error", &err_msg);
+            let err_payload = BurnErrorPayload {
+                stage: "CUE Generation".into(),
+                error: err_msg,
+            };
+            if let Ok(mut status) = BURN_STATUS.write() {
+                status.is_active = false;
+                status.error = Some(err_payload.clone());
+            }
+            let _ = app.emit("burn-error", err_payload);
+            return;
         }
-        let _ = app.emit("burn-error", err_payload);
-        return;
+        emit_log(
+            "info",
+            &format!("CUE sheet written to: {}", cue_path.display()),
+        );
     }
-    emit_log(
-        "info",
-        &format!("CUE sheet written to: {}", cue_path.display()),
-    );
 
     if burn_mode == BurnMode::ExportOnly {
         emit_log(
@@ -1164,5 +1224,48 @@ mod tests {
 
         // Cleanup
         let _ = save_config(AppConfig::default()).await;
+    }
+
+    #[test]
+    fn test_resolve_target_folder_name() {
+        let tracks = vec![SpotifyTrack {
+            id: "1".into(),
+            title: "Time".into(),
+            artists: vec!["Pink Floyd".into()],
+            album: "The Dark Side of the Moon".into(),
+            duration_ms: 420000,
+            track_number: 4,
+            isrc: None,
+        }];
+
+        // 1. Explicit folder name with invalid path characters
+        let res1 =
+            resolve_target_folder_name(Some("My Playlist / 2026 : Edition*"), &tracks, 12345);
+        assert_eq!(res1, "My Playlist _ 2026 _ Edition_");
+
+        // 2. Fallback to album name if folder_name is None
+        let res2 = resolve_target_folder_name(None, &tracks, 12345);
+        assert_eq!(res2, "The Dark Side of the Moon");
+
+        // 3. Fallback to album name if folder_name is empty or whitespace
+        let res3 = resolve_target_folder_name(Some("   "), &tracks, 12345);
+        assert_eq!(res3, "The Dark Side of the Moon");
+
+        // 4. Fallback to Artist - Title if album is empty
+        let tracks_no_album = vec![SpotifyTrack {
+            id: "2".into(),
+            title: "Single Song".into(),
+            artists: vec!["Solo Artist".into()],
+            album: "".into(),
+            duration_ms: 180000,
+            track_number: 1,
+            isrc: None,
+        }];
+        let res4 = resolve_target_folder_name(None, &tracks_no_album, 12345);
+        assert_eq!(res4, "Solo Artist - Single Song");
+
+        // 5. Fallback to Export_{timestamp} if tracks list is empty
+        let res5 = resolve_target_folder_name(None, &[], 987654321);
+        assert_eq!(res5, "Export_987654321");
     }
 }

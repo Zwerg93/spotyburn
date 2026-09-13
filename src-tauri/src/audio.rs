@@ -3,6 +3,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::models::SpotifyTrack;
+
 /// Red Book Audio CD-DA standard constants
 pub const REDBOOK_SAMPLE_RATE: u32 = 44_100;
 pub const REDBOOK_CHANNELS: u16 = 2;
@@ -281,6 +283,64 @@ impl FfmpegTranscoder {
 
         Ok(())
     }
+
+    /// Converts an input audio file into an MP3 file with ID3v2 metadata:
+    /// - `libmp3lame` audio encoder
+    /// - Specified bitrate in kbps (e.g. 320k)
+    /// - 44,100 Hz sampling rate
+    /// - ID3v2 metadata: title, artist, album, track number
+    pub fn convert_to_mp3(
+        &self,
+        input: &Path,
+        output: &Path,
+        bitrate_kbps: u32,
+        track: &SpotifyTrack,
+    ) -> Result<(), AudioError> {
+        let mut cmd = Command::new(&self.binary_path);
+        let args = build_mp3_command_args(input, output, bitrate_kbps, track);
+        cmd.args(&args);
+
+        let output_res = cmd
+            .output()
+            .map_err(|e| AudioError::ExecutionFailed(e.to_string()))?;
+
+        if !output_res.status.success() {
+            let stderr = String::from_utf8_lossy(&output_res.stderr);
+            return Err(AudioError::ExecutionFailed(stderr.into_owned()));
+        }
+
+        Ok(())
+    }
+}
+
+/// Generates the FFmpeg command line arguments for MP3 encoding with ID3 tags
+pub fn build_mp3_command_args(
+    input: &Path,
+    output: &Path,
+    bitrate_kbps: u32,
+    track: &SpotifyTrack,
+) -> Vec<String> {
+    let mut args = vec![
+        "-y".to_string(),
+        "-i".to_string(),
+        input.to_string_lossy().to_string(),
+        "-c:a".to_string(),
+        "libmp3lame".to_string(),
+        "-b:a".to_string(),
+        format!("{}k", bitrate_kbps),
+        "-ar".to_string(),
+        "44100".to_string(),
+        "-metadata".to_string(),
+        format!("title={}", track.title),
+        "-metadata".to_string(),
+        format!("artist={}", track.artists.join(", ")),
+        "-metadata".to_string(),
+        format!("album={}", track.album),
+        "-metadata".to_string(),
+        format!("track={}", track.track_number),
+    ];
+    args.push(output.to_string_lossy().to_string());
+    args
 }
 
 /// Helper function to create a minimal canonical PCM WAV buffer for testing.
@@ -320,6 +380,17 @@ pub fn convert_to_redbook_wav(
 ) -> Result<(), AudioError> {
     let transcoder = FfmpegTranscoder::new()?;
     transcoder.convert_to_redbook_wav(input, output, normalize)
+}
+
+/// Standalone convenience function for MP3 conversion
+pub fn convert_to_mp3(
+    input: &Path,
+    output: &Path,
+    bitrate_kbps: u32,
+    track: &SpotifyTrack,
+) -> Result<(), AudioError> {
+    let transcoder = FfmpegTranscoder::new()?;
+    transcoder.convert_to_mp3(input, output, bitrate_kbps, track)
 }
 
 #[cfg(test)]
@@ -456,5 +527,38 @@ mod tests {
         assert_eq!(found.unwrap(), dummy_bin);
 
         let _ = std::fs::remove_file(dummy_bin);
+    }
+
+    #[test]
+    fn test_build_mp3_command_args() {
+        let track = SpotifyTrack {
+            id: "track123".to_string(),
+            title: "Bohemian Rhapsody".to_string(),
+            artists: vec!["Queen".to_string(), "Freddie Mercury".to_string()],
+            album: "A Night at the Opera".to_string(),
+            duration_ms: 354000,
+            track_number: 11,
+            isrc: Some("GBUM71029604".to_string()),
+        };
+
+        let input = Path::new("/tmp/input.webm");
+        let output = Path::new("/tmp/output.mp3");
+        let args = build_mp3_command_args(input, output, 320, &track);
+
+        assert_eq!(args[0], "-y");
+        assert_eq!(args[1], "-i");
+        assert_eq!(args[2], "/tmp/input.webm");
+        assert_eq!(args[3], "-c:a");
+        assert_eq!(args[4], "libmp3lame");
+        assert_eq!(args[5], "-b:a");
+        assert_eq!(args[6], "320k");
+        assert_eq!(args[7], "-ar");
+        assert_eq!(args[8], "44100");
+
+        assert!(args.contains(&"title=Bohemian Rhapsody".to_string()));
+        assert!(args.contains(&"artist=Queen, Freddie Mercury".to_string()));
+        assert!(args.contains(&"album=A Night at the Opera".to_string()));
+        assert!(args.contains(&"track=11".to_string()));
+        assert_eq!(args.last().unwrap(), "/tmp/output.mp3");
     }
 }

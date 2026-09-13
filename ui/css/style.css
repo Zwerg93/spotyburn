@@ -1180,6 +1180,42 @@ body {
   flex-shrink: 0;
 }
 
+.dest-subfolder-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.dest-subfolder-wrap label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+#dest-subfolder-input {
+  width: 175px;
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  padding: 4px 8px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xs);
+  color: var(--text-primary);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+#dest-subfolder-input:focus {
+  outline: none;
+  border-color: var(--accent-spotify);
+  box-shadow: 0 0 0 1px var(--accent-spotify);
+}
+
+#dest-subfolder-input::placeholder {
+  color: var(--text-muted);
+}
+
 .btn-added {
   background-color: rgba(16, 185, 129, 0.15) !important;
   color: var(--status-emerald) !important;
