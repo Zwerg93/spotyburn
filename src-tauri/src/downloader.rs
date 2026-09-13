@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -96,6 +97,112 @@ pub fn select_best_candidate(
         }
     }
     None
+}
+
+/// Returns an augmented `PATH` environment variable containing:
+/// `~/.spotyburn/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`,
+/// plus existing system PATH entries, eliminating duplicate entries while preserving order.
+pub fn get_augmented_path() -> OsString {
+    let mut entries: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let mut add_entry = |p: PathBuf| {
+        if seen.insert(p.clone()) {
+            entries.push(p);
+        }
+    };
+
+    if let Some(home) = dirs::home_dir() {
+        add_entry(home.join(".spotyburn").join("bin"));
+    }
+    add_entry(PathBuf::from("/opt/homebrew/bin"));
+    add_entry(PathBuf::from("/usr/local/bin"));
+    add_entry(PathBuf::from("/usr/bin"));
+    add_entry(PathBuf::from("/bin"));
+
+    if let Some(system_path) = std::env::var_os("PATH") {
+        for p in std::env::split_paths(&system_path) {
+            add_entry(p);
+        }
+    }
+
+    std::env::join_paths(entries).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// Detects available JavaScript runtimes for `yt-dlp` signature decryption (n-sig).
+/// If `deno` is found in the augmented PATH, returns an empty vector (yt-dlp uses Deno automatically).
+/// If `deno` is not found, but `node` is present, returns `vec!["--js-runtimes", format!("node:{}", node_path.display())]`.
+/// If neither is found, returns an empty vector.
+pub fn detect_js_runtime_args() -> Vec<String> {
+    let aug_path = get_augmented_path();
+    let dirs: Vec<PathBuf> = std::env::split_paths(&aug_path).collect();
+
+    let deno_name = if cfg!(windows) { "deno.exe" } else { "deno" };
+    for dir in &dirs {
+        let candidate = dir.join(deno_name);
+        if candidate.is_file() {
+            return Vec::new();
+        }
+    }
+
+    let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+    for dir in &dirs {
+        let candidate = dir.join(node_name);
+        if candidate.is_file() {
+            return vec![
+                "--js-runtimes".to_string(),
+                format!("node:{}", candidate.display()),
+            ];
+        }
+    }
+
+    Vec::new()
+}
+
+/// Ranks YouTube candidates for downloading:
+/// - Group 1: Candidates whose duration is within `tolerance_ms`, sorted by lowest duration difference `|expected - actual|`.
+/// - Group 2: Remaining candidates, sorted by lowest duration difference if known, or by original relevance order.
+pub fn rank_candidates<'a>(
+    candidates: &'a [YtCandidate],
+    expected_duration_ms: u64,
+    tolerance_ms: u64,
+) -> Vec<&'a YtCandidate> {
+    let mut group1: Vec<(usize, &'a YtCandidate, u64)> = Vec::new();
+    let mut group2: Vec<(usize, &'a YtCandidate, Option<u64>)> = Vec::new();
+
+    for (idx, cand) in candidates.iter().enumerate() {
+        if let Some(actual_ms) = cand.duration_ms() {
+            let diff = (expected_duration_ms as i64 - actual_ms as i64).unsigned_abs();
+            if diff <= tolerance_ms {
+                group1.push((idx, cand, diff));
+            } else {
+                group2.push((idx, cand, Some(diff)));
+            }
+        } else {
+            group2.push((idx, cand, None));
+        }
+    }
+
+    // Sort group 1: lowest duration difference first; break ties with original index
+    group1.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
+
+    // Sort group 2: lowest duration difference first if known, otherwise original index
+    group2.sort_by(|a, b| match (a.2, b.2) {
+        (Some(d_a), Some(d_b)) => d_a.cmp(&d_b).then_with(|| a.0.cmp(&b.0)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.0.cmp(&b.0),
+    });
+
+    let mut result = Vec::with_capacity(candidates.len());
+    for (_, cand, _) in group1 {
+        result.push(cand);
+    }
+    for (_, cand, _) in group2 {
+        result.push(cand);
+    }
+
+    result
 }
 
 /// Locates the `yt-dlp` executable on the system:
@@ -197,12 +304,16 @@ impl YtDlpDownloader {
         limit: usize,
     ) -> Result<Vec<YtCandidate>, DownloadError> {
         let search_spec = format!("ytsearch{}:{}", limit, query);
-        let output = Command::new(&self.binary_path)
-            .arg("--dump-json")
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.env("PATH", get_augmented_path());
+        cmd.args(detect_js_runtime_args());
+        cmd.arg("--dump-json")
             .arg("--no-playlist")
             .arg("--default-search")
             .arg("auto")
-            .arg(&search_spec)
+            .arg(&search_spec);
+
+        let output = cmd
             .output()
             .map_err(|e| DownloadError::ExecutionFailed(e.to_string()))?;
 
@@ -217,8 +328,8 @@ impl YtDlpDownloader {
 
     /// Orchestrates matching and downloading a track:
     /// 1. Builds search query `"{artist} - {title} (Official Audio)"`
-    /// 2. Searches candidates and verifies duration tolerance (±15s), falls back to first result
-    /// 3. Downloads the matched candidate audio into `cache_dir`
+    /// 2. Searches candidates and ranks them (duration tolerance ±15s, closest match first)
+    /// 3. Downloads candidate audio into `cache_dir`, falling back to next candidates on failure
     /// 4. Returns the path of the downloaded file
     pub fn match_and_download(
         &self,
@@ -230,65 +341,146 @@ impl YtDlpDownloader {
         let query = build_search_query_for_track(track);
         let candidates = self.search_candidates(&query, 10)?;
 
-        // Try strict tolerance first, then fall back to the first candidate
-        let candidate = select_best_candidate(&candidates, track.duration_ms, self.tolerance_ms)
-            .or_else(|| candidates.first())
-            .ok_or_else(|| DownloadError::NoMatchingCandidate {
+        if candidates.is_empty() {
+            return Err(DownloadError::NoMatchingCandidate {
+                title: track.title.clone(),
+                expected_ms: track.duration_ms,
+                candidates_checked: 0,
+            });
+        }
+
+        let ranked = rank_candidates(&candidates, track.duration_ms, self.tolerance_ms);
+        if ranked.is_empty() {
+            return Err(DownloadError::NoMatchingCandidate {
                 title: track.title.clone(),
                 expected_ms: track.duration_ms,
                 candidates_checked: candidates.len(),
-            })?;
-
-        let url = candidate
-            .webpage_url
-            .clone()
-            .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={}", candidate.id));
-
-        // Output template using track ID
-        let output_template = cache_dir.join(format!("{}.%(ext)s", track.id));
-
-        let download_output = Command::new(&self.binary_path)
-            .arg("-f")
-            .arg("ba/b")
-            .arg("--no-playlist")
-            .arg("-o")
-            .arg(output_template.to_string_lossy().as_ref())
-            .arg("--print")
-            .arg("after_move:filepath")
-            .arg(&url)
-            .output()
-            .map_err(|e| DownloadError::ExecutionFailed(e.to_string()))?;
-
-        if !download_output.status.success() {
-            let err = String::from_utf8_lossy(&download_output.stderr);
-            return Err(DownloadError::ExecutionFailed(err.into_owned()));
+            });
         }
 
-        let printed_path = String::from_utf8_lossy(&download_output.stdout)
-            .trim()
-            .to_string();
-        if !printed_path.is_empty() {
-            let p = PathBuf::from(printed_path);
-            if p.is_file() {
-                return Ok(p);
+        let mut errors = Vec::new();
+
+        for candidate in &ranked {
+            let candidate_title = candidate.title.as_deref().unwrap_or("Unknown");
+            let url = candidate
+                .webpage_url
+                .clone()
+                .unwrap_or_else(|| format!("https://www.youtube.com/watch?v={}", candidate.id));
+
+            // Output template using track ID
+            let output_template = cache_dir.join(format!("{}.%(ext)s", track.id));
+
+            let mut cmd = Command::new(&self.binary_path);
+            cmd.env("PATH", get_augmented_path());
+            cmd.args(detect_js_runtime_args());
+            cmd.arg("-f")
+                .arg("ba/b")
+                .arg("--no-playlist")
+                .arg("-o")
+                .arg(output_template.to_string_lossy().as_ref())
+                .arg("--print")
+                .arg("after_move:filepath")
+                .arg(&url);
+
+            let download_output = match cmd.output() {
+                Ok(out) => out,
+                Err(e) => {
+                    let err_msg = format!("Failed to spawn yt-dlp: {}", e);
+                    eprintln!(
+                        "Warning: Download candidate {} ({}) failed: {}. Trying next candidate...",
+                        candidate.id, candidate_title, err_msg
+                    );
+                    errors.push(format!(
+                        "Candidate {} ({}): {}",
+                        candidate.id, candidate_title, err_msg
+                    ));
+                    continue;
+                }
+            };
+
+            if download_output.status.success() {
+                let printed_path = String::from_utf8_lossy(&download_output.stdout)
+                    .trim()
+                    .to_string();
+                if !printed_path.is_empty() {
+                    let p = PathBuf::from(printed_path);
+                    if p.is_file() && p.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                        return Ok(p);
+                    }
+                }
+
+                // Fallback check: find any file in cache_dir starting with track.id
+                let mut found_path = None;
+                if let Ok(entries) = std::fs::read_dir(cache_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if let Some(stem) = path.file_stem() {
+                            if stem == track.id.as_str()
+                                && path.is_file()
+                                && path.metadata().map(|m| m.len() > 0).unwrap_or(false)
+                            {
+                                found_path = Some(path);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(path) = found_path {
+                    return Ok(path);
+                }
+
+                let err_msg =
+                    "yt-dlp reported success but downloaded file is missing or 0 bytes".to_string();
+                eprintln!(
+                    "Warning: Download candidate {} ({}) failed: {}. Trying next candidate...",
+                    candidate.id, candidate_title, err_msg
+                );
+                errors.push(format!(
+                    "Candidate {} ({}): {}",
+                    candidate.id, candidate_title, err_msg
+                ));
+            } else {
+                let stderr = String::from_utf8_lossy(&download_output.stderr)
+                    .trim()
+                    .to_string();
+                let err_msg = if stderr.is_empty() {
+                    format!("yt-dlp exited with status {}", download_output.status)
+                } else {
+                    stderr
+                };
+                eprintln!(
+                    "Warning: Download candidate {} ({}) failed: {}. Trying next candidate...",
+                    candidate.id, candidate_title, err_msg
+                );
+                errors.push(format!(
+                    "Candidate {} ({}): {}",
+                    candidate.id, candidate_title, err_msg
+                ));
             }
-        }
 
-        // Fallback check: find any file in cache_dir starting with track.id
-        if let Ok(entries) = std::fs::read_dir(cache_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(stem) = path.file_stem() {
-                    if stem == track.id.as_str() && path.is_file() {
-                        return Ok(path);
+            // Clean up any 0-byte ghost files from failed attempt
+            if let Ok(entries) = std::fs::read_dir(cache_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(stem) = path.file_stem() {
+                        if stem == track.id.as_str()
+                            && path.is_file()
+                            && path.metadata().map(|m| m.len() == 0).unwrap_or(false)
+                        {
+                            let _ = std::fs::remove_file(path);
+                        }
                     }
                 }
             }
         }
 
-        Err(DownloadError::ExecutionFailed(
-            "Download succeeded but downloaded file could not be located".to_string(),
-        ))
+        Err(DownloadError::ExecutionFailed(format!(
+            "All {} download candidates failed for track '{}':\n{}",
+            ranked.len(),
+            track.title,
+            errors.join("\n")
+        )))
     }
 }
 
@@ -477,5 +669,149 @@ mod tests {
         assert_eq!(found.unwrap(), dummy_bin);
 
         let _ = std::fs::remove_file(dummy_bin);
+    }
+
+    #[test]
+    fn test_get_augmented_path() {
+        let aug = get_augmented_path();
+        assert!(!aug.is_empty(), "Augmented PATH should not be empty");
+
+        let paths: Vec<PathBuf> = std::env::split_paths(&aug).collect();
+        assert!(!paths.is_empty(), "Parsed PATH entries should not be empty");
+
+        // Verify no duplicates
+        let mut seen = std::collections::HashSet::new();
+        for p in &paths {
+            assert!(
+                seen.insert(p.clone()),
+                "Duplicate path entry found in get_augmented_path: {:?}",
+                p
+            );
+        }
+
+        // Verify standard paths on Unix/macOS
+        #[cfg(unix)]
+        {
+            assert!(
+                paths.contains(&PathBuf::from("/usr/bin")),
+                "Must contain /usr/bin"
+            );
+            assert!(paths.contains(&PathBuf::from("/bin")), "Must contain /bin");
+            assert!(
+                paths.contains(&PathBuf::from("/usr/local/bin")),
+                "Must contain /usr/local/bin"
+            );
+            assert!(
+                paths.contains(&PathBuf::from("/opt/homebrew/bin")),
+                "Must contain /opt/homebrew/bin"
+            );
+        }
+
+        if let Some(home) = dirs::home_dir() {
+            let spotyburn_bin = home.join(".spotyburn").join("bin");
+            assert_eq!(
+                paths.first(),
+                Some(&spotyburn_bin),
+                "~/.spotyburn/bin must be the first entry in augmented PATH"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rank_candidates() {
+        let expected_duration_ms = 200_000; // 200 seconds
+        let tolerance_ms = 15_000; // ±15 seconds
+
+        let candidates = vec![
+            YtCandidate {
+                id: "c_diff_10".to_string(),
+                title: Some("Candidate Diff 10s".to_string()),
+                duration: Some(210.0), // 210s -> diff 10s (Group 1)
+                webpage_url: None,
+            },
+            YtCandidate {
+                id: "c_exact".to_string(),
+                title: Some("Candidate Exact".to_string()),
+                duration: Some(200.0), // 200s -> diff 0s (Group 1)
+                webpage_url: None,
+            },
+            YtCandidate {
+                id: "c_diff_2".to_string(),
+                title: Some("Candidate Diff 2s".to_string()),
+                duration: Some(198.0), // 198s -> diff 2s (Group 1)
+                webpage_url: None,
+            },
+            YtCandidate {
+                id: "c_diff_15_boundary".to_string(),
+                title: Some("Candidate Diff 15s Boundary".to_string()),
+                duration: Some(215.0), // 215s -> diff 15s (Group 1)
+                webpage_url: None,
+            },
+            YtCandidate {
+                id: "c_diff_16_out".to_string(),
+                title: Some("Candidate Diff 16s Out".to_string()),
+                duration: Some(216.0), // 216s -> diff 16s (Group 2)
+                webpage_url: None,
+            },
+            YtCandidate {
+                id: "c_diff_60_out".to_string(),
+                title: Some("Candidate Diff 60s Out".to_string()),
+                duration: Some(260.0), // 260s -> diff 60s (Group 2)
+                webpage_url: None,
+            },
+            YtCandidate {
+                id: "c_no_duration_1".to_string(),
+                title: Some("Candidate Unknown Duration 1".to_string()),
+                duration: None, // Group 2, unknown
+                webpage_url: None,
+            },
+            YtCandidate {
+                id: "c_no_duration_2".to_string(),
+                title: Some("Candidate Unknown Duration 2".to_string()),
+                duration: None, // Group 2, unknown
+                webpage_url: None,
+            },
+            YtCandidate {
+                id: "c_diff_2_second".to_string(),
+                title: Some("Candidate Diff 2s Second".to_string()),
+                duration: Some(202.0), // 202s -> diff 2s (Group 1, tie with c_diff_2)
+                webpage_url: None,
+            },
+        ];
+
+        let ranked = rank_candidates(&candidates, expected_duration_ms, tolerance_ms);
+        let ranked_ids: Vec<&str> = ranked.iter().map(|c| c.id.as_str()).collect();
+
+        assert_eq!(
+            ranked_ids,
+            vec![
+                "c_exact",            // diff 0s (Group 1)
+                "c_diff_2",           // diff 2s (Group 1, first)
+                "c_diff_2_second",    // diff 2s (Group 1, second by original index)
+                "c_diff_10",          // diff 10s (Group 1)
+                "c_diff_15_boundary", // diff 15s (Group 1, exact tolerance boundary)
+                "c_diff_16_out",      // diff 16s (Group 2, lowest diff)
+                "c_diff_60_out",      // diff 60s (Group 2)
+                "c_no_duration_1",    // unknown duration (Group 2, first by original index)
+                "c_no_duration_2",    // unknown duration (Group 2, second by original index)
+            ]
+        );
+    }
+
+    #[test]
+    fn test_rank_candidates_empty() {
+        let ranked = rank_candidates(&[], 200_000, 15_000);
+        assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn test_detect_js_runtime_args() {
+        let args = detect_js_runtime_args();
+        // If deno is installed, args should be empty.
+        // If only node is installed, args should contain --js-runtimes node:...
+        if !args.is_empty() {
+            assert_eq!(args[0], "--js-runtimes");
+            assert!(args[1].starts_with("node:"));
+        }
     }
 }

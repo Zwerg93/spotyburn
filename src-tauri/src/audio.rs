@@ -3,6 +3,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::downloader::get_augmented_path;
 use crate::models::SpotifyTrack;
 
 /// Red Book Audio CD-DA standard constants
@@ -254,6 +255,7 @@ impl FfmpegTranscoder {
         normalize: bool,
     ) -> Result<(), AudioError> {
         let mut cmd = Command::new(&self.binary_path);
+        cmd.env("PATH", get_augmented_path());
         cmd.arg("-y"); // Overwrite output file
         cmd.arg("-i").arg(input);
 
@@ -297,6 +299,7 @@ impl FfmpegTranscoder {
         track: &SpotifyTrack,
     ) -> Result<(), AudioError> {
         let mut cmd = Command::new(&self.binary_path);
+        cmd.env("PATH", get_augmented_path());
         let args = build_mp3_command_args(input, output, bitrate_kbps, track);
         cmd.args(&args);
 
