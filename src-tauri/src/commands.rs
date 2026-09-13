@@ -689,7 +689,12 @@ async fn run_burn_pipeline(
         })
         .await
         {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                // Delete intermediate raw download file (e.g. .webm, .m4a) to keep folder clean
+                if raw_file != wav_path && raw_file.is_file() {
+                    let _ = std::fs::remove_file(&raw_file);
+                }
+            }
             Ok(Err(e)) => {
                 emit_log(
                     "warn",
@@ -698,6 +703,10 @@ async fn run_burn_pipeline(
                         track_num, total_tracks, track.title
                     ),
                 );
+                // Clean up raw file if transcode failed
+                if raw_file != wav_path && raw_file.is_file() {
+                    let _ = std::fs::remove_file(&raw_file);
+                }
                 continue;
             }
             Err(e) => {
@@ -708,6 +717,9 @@ async fn run_burn_pipeline(
                         track_num, total_tracks, track.title
                     ),
                 );
+                if raw_file != wav_path && raw_file.is_file() {
+                    let _ = std::fs::remove_file(&raw_file);
+                }
                 continue;
             }
         }
