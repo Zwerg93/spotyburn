@@ -28,6 +28,7 @@ pub fn run() {
             commands::open_cache_folder,
             commands::select_destination_folder,
             commands::calculate_capacity,
+            commands::get_burn_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running spotyburn application");

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{LazyLock, RwLock};
 use tauri::Emitter;
 
 use crate::burner::{
@@ -47,6 +48,22 @@ pub struct BurnErrorPayload {
     pub stage: String,
     pub error: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BurnStatusResponse {
+    pub is_active: bool,
+    pub stage: String,
+    pub percent: f32,
+    pub current_track: Option<u32>,
+    pub total_tracks: Option<u32>,
+    pub message: String,
+    pub logs: Vec<BurnLogPayload>,
+    pub finished: Option<BurnFinishedPayload>,
+    pub error: Option<BurnErrorPayload>,
+}
+
+pub static BURN_STATUS: LazyLock<RwLock<BurnStatusResponse>> =
+    LazyLock::new(|| RwLock::new(BurnStatusResponse::default()));
 
 pub fn format_duration_ms(ms: u64) -> String {
     let total_secs = ms / 1000;
@@ -141,6 +158,12 @@ pub async fn save_config(config: AppConfig) -> Result<(), String> {
         }
     }
     merged.save().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_burn_status() -> Result<BurnStatusResponse, String> {
+    let status = BURN_STATUS.read().map_err(|e| e.to_string())?;
+    Ok(status.clone())
 }
 
 fn get_spotify_credentials(config: &AppConfig) -> (String, String) {
@@ -478,29 +501,50 @@ async fn run_burn_pipeline(
     simulate: bool,
 ) {
     let total_tracks = tracks.len();
+    {
+        if let Ok(mut status) = BURN_STATUS.write() {
+            *status = BurnStatusResponse {
+                is_active: true,
+                stage: "Preparing".into(),
+                percent: 0.0,
+                current_track: None,
+                total_tracks: Some(total_tracks as u32),
+                message: "Vorgang wird vorbereitet...".into(),
+                logs: Vec::new(),
+                finished: None,
+                error: None,
+            };
+        }
+    }
 
     let emit_log = |level: &str, msg: &str| {
-        let _ = app.emit(
-            "burn-log",
-            BurnLogPayload {
-                level: level.to_string(),
-                message: msg.to_string(),
-                timestamp: current_timestamp(),
-            },
-        );
+        let payload = BurnLogPayload {
+            level: level.to_string(),
+            message: msg.to_string(),
+            timestamp: current_timestamp(),
+        };
+        if let Ok(mut status) = BURN_STATUS.write() {
+            status.logs.push(payload.clone());
+        }
+        let _ = app.emit("burn-log", payload);
     };
 
     let emit_progress = |stage: &str, pct: f32, cur: Option<u32>, tot: Option<u32>, msg: &str| {
-        let _ = app.emit(
-            "burn-progress",
-            BurnProgressPayload {
-                stage: stage.to_string(),
-                percent: pct,
-                current_track: cur,
-                total_tracks: tot,
-                message: msg.to_string(),
-            },
-        );
+        let payload = BurnProgressPayload {
+            stage: stage.to_string(),
+            percent: pct,
+            current_track: cur,
+            total_tracks: tot,
+            message: msg.to_string(),
+        };
+        if let Ok(mut status) = BURN_STATUS.write() {
+            status.stage = stage.to_string();
+            status.percent = pct;
+            status.current_track = cur;
+            status.total_tracks = tot;
+            status.message = msg.to_string();
+        }
+        let _ = app.emit("burn-progress", payload);
     };
 
     if burn_mode == BurnMode::ExportOnly {
@@ -538,13 +582,15 @@ async fn run_burn_pipeline(
     if let Err(e) = std::fs::create_dir_all(&job_dir) {
         let err_msg = format!("Failed to create workspace directory: {e}");
         emit_log("error", &err_msg);
-        let _ = app.emit(
-            "burn-error",
-            BurnErrorPayload {
-                stage: "Workspace".into(),
-                error: err_msg,
-            },
-        );
+        let err_payload = BurnErrorPayload {
+            stage: "Workspace".into(),
+            error: err_msg,
+        };
+        if let Ok(mut status) = BURN_STATUS.write() {
+            status.is_active = false;
+            status.error = Some(err_payload.clone());
+        }
+        let _ = app.emit("burn-error", err_payload);
         return;
     }
 
@@ -688,13 +734,15 @@ async fn run_burn_pipeline(
     if let Err(e) = cuesheet::generate_cuesheet(&audio_tracks, &cue_path) {
         let err_msg = format!("CUE sheet generation failed: {e}");
         emit_log("error", &err_msg);
-        let _ = app.emit(
-            "burn-error",
-            BurnErrorPayload {
-                stage: "CUE Generation".into(),
-                error: err_msg,
-            },
-        );
+        let err_payload = BurnErrorPayload {
+            stage: "CUE Generation".into(),
+            error: err_msg,
+        };
+        if let Ok(mut status) = BURN_STATUS.write() {
+            status.is_active = false;
+            status.error = Some(err_payload.clone());
+        }
+        let _ = app.emit("burn-error", err_payload);
         return;
     }
     emit_log(
@@ -718,14 +766,16 @@ async fn run_burn_pipeline(
             "Export completed successfully!",
         );
         let _ = open_in_file_manager(&job_dir);
-        let _ = app.emit(
-            "burn-finished",
-            BurnFinishedPayload {
-                success: true,
-                message: format!("Export completed successfully to {}", job_dir.display()),
-                total_tracks,
-            },
-        );
+        let fin_payload = BurnFinishedPayload {
+            success: true,
+            message: format!("Export completed successfully to {}", job_dir.display()),
+            total_tracks,
+        };
+        if let Ok(mut status) = BURN_STATUS.write() {
+            status.is_active = false;
+            status.finished = Some(fin_payload.clone());
+        }
+        let _ = app.emit("burn-finished", fin_payload);
         return;
     }
 
@@ -758,14 +808,16 @@ async fn run_burn_pipeline(
             emit_log("info", &format!("Simulated burn progress: {}%", step));
         }
         emit_log("success", "Simulation finished successfully.");
-        let _ = app.emit(
-            "burn-finished",
-            BurnFinishedPayload {
-                success: true,
-                message: "Simulation completed successfully".into(),
-                total_tracks,
-            },
-        );
+        let fin_payload = BurnFinishedPayload {
+            success: true,
+            message: "Simulation completed successfully".into(),
+            total_tracks,
+        };
+        if let Ok(mut status) = BURN_STATUS.write() {
+            status.is_active = false;
+            status.finished = Some(fin_payload.clone());
+        }
+        let _ = app.emit("burn-finished", fin_payload);
         return;
     }
 
@@ -838,25 +890,29 @@ async fn run_burn_pipeline(
                 Some(total_tracks as u32),
                 "Burn completed successfully!",
             );
-            let _ = app.emit(
-                "burn-finished",
-                BurnFinishedPayload {
-                    success: true,
-                    message: "Disc successfully burned!".into(),
-                    total_tracks,
-                },
-            );
+            let fin_payload = BurnFinishedPayload {
+                success: true,
+                message: "Disc successfully burned!".into(),
+                total_tracks,
+            };
+            if let Ok(mut status) = BURN_STATUS.write() {
+                status.is_active = false;
+                status.finished = Some(fin_payload.clone());
+            }
+            let _ = app.emit("burn-finished", fin_payload);
         }
         Err(e) => {
             let err_msg = format!("Burning failed: {e}");
             emit_log("error", &err_msg);
-            let _ = app.emit(
-                "burn-error",
-                BurnErrorPayload {
-                    stage: "Burning".into(),
-                    error: err_msg,
-                },
-            );
+            let err_payload = BurnErrorPayload {
+                stage: "Burning".into(),
+                error: err_msg,
+            };
+            if let Ok(mut status) = BURN_STATUS.write() {
+                status.is_active = false;
+                status.error = Some(err_payload.clone());
+            }
+            let _ = app.emit("burn-error", err_payload);
         }
     }
 }

@@ -34,6 +34,8 @@ const state = {
   searchResults: { tracks: [], albums: [], playlists: [] },
   activeSearchTab: "all",
   unreadLogs: false,
+  burnPollingInterval: null,
+  lastLogIndex: 0,
 };
 
 // DOM Elements cache
@@ -1228,6 +1230,8 @@ async function startBurnJob() {
       ejectAfter,
       simulate,
     });
+    // Start active polling as fallback to ensure logs and progress always update in real time
+    startBurnStatusPolling();
   } catch (err) {
     state.isBurning = false;
     elements.logStatusBadge?.classList.remove("active");
@@ -1435,6 +1439,7 @@ function setupTauriEventListeners() {
   });
 
   tauriListen("burn-finished", (event) => {
+    stopBurnStatusPolling();
     const payload = event.payload;
     state.isBurning = false;
     elements.logStatusBadge?.classList.remove("active");
@@ -1449,6 +1454,7 @@ function setupTauriEventListeners() {
   });
 
   tauriListen("burn-error", (event) => {
+    stopBurnStatusPolling();
     const payload = event.payload;
     state.isBurning = false;
     elements.logStatusBadge?.classList.remove("active");
@@ -1460,6 +1466,71 @@ function setupTauriEventListeners() {
 
     logMessage("error", `❌ Fehler in Phase '${payload?.stage}': ${payload?.error}`);
   });
+}
+
+function startBurnStatusPolling() {
+  stopBurnStatusPolling();
+  state.lastLogIndex = 0;
+  state.burnPollingInterval = setInterval(async () => {
+    try {
+      const status = await callIpc("get_burn_status");
+      if (!status) return;
+
+      // Update progress UI
+      if (status.stage) {
+        elements.burnStageText.textContent = status.stage;
+      }
+      const pct = Math.min(Math.max(status.percent || 0, 0), 100);
+      elements.burnPctText.textContent = `${pct.toFixed(0)}%`;
+      elements.burnProgressFill.style.width = `${pct}%`;
+
+      if (status.message) {
+        elements.burnDetailText.textContent = status.message;
+      }
+
+      // Stream any new logs
+      if (Array.isArray(status.logs) && status.logs.length > state.lastLogIndex) {
+        for (let i = state.lastLogIndex; i < status.logs.length; i++) {
+          const logEntry = status.logs[i];
+          logMessage(logEntry.level || "info", logEntry.message || "");
+        }
+        state.lastLogIndex = status.logs.length;
+      }
+
+      // Check if finished or errored
+      if (status.finished) {
+        stopBurnStatusPolling();
+        state.isBurning = false;
+        elements.logStatusBadge?.classList.remove("active");
+        updateCapacityMeter();
+        elements.burnStageText.textContent = "Erfolgreich abgeschlossen";
+        elements.burnPctText.textContent = "100%";
+        elements.burnProgressFill.style.width = "100%";
+        elements.burnDetailText.textContent = status.finished.message || "Vorgang beendet.";
+        logMessage("success", `✓ Vorgang abgeschlossen: ${status.finished.message || "Erfolg"}`);
+      } else if (status.error) {
+        stopBurnStatusPolling();
+        state.isBurning = false;
+        elements.logStatusBadge?.classList.remove("active");
+        elements.logStatusBadge?.classList.add("error");
+        updateCapacityMeter();
+        elements.burnStageText.textContent = "Fehlgeschlagen";
+        elements.burnDetailText.textContent = status.error.error || "Ein Fehler ist aufgetreten.";
+        logMessage("error", `❌ Fehler in Phase '${status.error.stage}': ${status.error.error}`);
+      } else if (!status.is_active && pct >= 100) {
+        stopBurnStatusPolling();
+      }
+    } catch (e) {
+      console.warn("Burn status polling error:", e);
+    }
+  }, 400);
+}
+
+function stopBurnStatusPolling() {
+  if (state.burnPollingInterval) {
+    clearInterval(state.burnPollingInterval);
+    state.burnPollingInterval = null;
+  }
 }
 
 // ==========================================================================

@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the main window including event listening and core functionality",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}
