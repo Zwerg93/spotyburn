@@ -597,28 +597,24 @@ async fn run_burn_pipeline(
         {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
-                let err_msg = format!("Download failed for track '{}': {e}", track.title);
-                emit_log("error", &err_msg);
-                let _ = app.emit(
-                    "burn-error",
-                    BurnErrorPayload {
-                        stage: "Downloading".into(),
-                        error: err_msg,
-                    },
+                emit_log(
+                    "warn",
+                    &format!(
+                        "[{}/{}] ⚠ Übersprungen – Download fehlgeschlagen für '{}': {e}",
+                        track_num, total_tracks, track.title
+                    ),
                 );
-                return;
+                continue; // skip this track, continue with next
             }
             Err(e) => {
-                let err_msg = format!("Download task panicked for track '{}': {e}", track.title);
-                emit_log("error", &err_msg);
-                let _ = app.emit(
-                    "burn-error",
-                    BurnErrorPayload {
-                        stage: "Downloading".into(),
-                        error: err_msg,
-                    },
+                emit_log(
+                    "warn",
+                    &format!(
+                        "[{}/{}] ⚠ Übersprungen – Download-Task abgestürzt für '{}': {e}",
+                        track_num, total_tracks, track.title
+                    ),
                 );
-                return;
+                continue;
             }
         };
 
@@ -649,28 +645,24 @@ async fn run_burn_pipeline(
         {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                let err_msg = format!("Transcoding failed for track '{}': {e}", track.title);
-                emit_log("error", &err_msg);
-                let _ = app.emit(
-                    "burn-error",
-                    BurnErrorPayload {
-                        stage: "Transcoding".into(),
-                        error: err_msg,
-                    },
+                emit_log(
+                    "warn",
+                    &format!(
+                        "[{}/{}] ⚠ Übersprungen – Transcode fehlgeschlagen für '{}': {e}",
+                        track_num, total_tracks, track.title
+                    ),
                 );
-                return;
+                continue;
             }
             Err(e) => {
-                let err_msg = format!("Transcode task panicked for track '{}': {e}", track.title);
-                emit_log("error", &err_msg);
-                let _ = app.emit(
-                    "burn-error",
-                    BurnErrorPayload {
-                        stage: "Transcoding".into(),
-                        error: err_msg,
-                    },
+                emit_log(
+                    "warn",
+                    &format!(
+                        "[{}/{}] ⚠ Übersprungen – Transcode-Task abgestürzt für '{}': {e}",
+                        track_num, total_tracks, track.title
+                    ),
                 );
-                return;
+                continue;
             }
         }
 

@@ -3,8 +3,9 @@ use std::process::Command;
 
 use crate::models::SpotifyTrack;
 
-/// Default tolerance in milliseconds (±5 seconds)
-pub const DEFAULT_DURATION_TOLERANCE_MS: u64 = 5_000;
+/// Default tolerance in milliseconds (±15 seconds) — generous enough for YouTube versions
+/// that include intros, outros, or slightly different edits vs. Spotify metadata
+pub const DEFAULT_DURATION_TOLERANCE_MS: u64 = 15_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DownloadError {
@@ -216,7 +217,7 @@ impl YtDlpDownloader {
 
     /// Orchestrates matching and downloading a track:
     /// 1. Builds search query `"{artist} - {title} (Official Audio)"`
-    /// 2. Searches candidates and verifies duration tolerance (±5s)
+    /// 2. Searches candidates and verifies duration tolerance (±15s), falls back to first result
     /// 3. Downloads the matched candidate audio into `cache_dir`
     /// 4. Returns the path of the downloaded file
     pub fn match_and_download(
@@ -227,9 +228,11 @@ impl YtDlpDownloader {
         std::fs::create_dir_all(cache_dir)?;
 
         let query = build_search_query_for_track(track);
-        let candidates = self.search_candidates(&query, 5)?;
+        let candidates = self.search_candidates(&query, 10)?;
 
+        // Try strict tolerance first, then fall back to the first candidate
         let candidate = select_best_candidate(&candidates, track.duration_ms, self.tolerance_ms)
+            .or_else(|| candidates.first())
             .ok_or_else(|| DownloadError::NoMatchingCandidate {
                 title: track.title.clone(),
                 expected_ms: track.duration_ms,
@@ -376,15 +379,15 @@ mod tests {
         // Exact match
         assert!(check_duration_tolerance(spotify_ms, 200_000));
 
-        // Within +5 seconds (5000 ms)
-        assert!(check_duration_tolerance(spotify_ms, 205_000));
-        // Within -5 seconds
-        assert!(check_duration_tolerance(spotify_ms, 195_000));
+        // Within +15 seconds (15000 ms)
+        assert!(check_duration_tolerance(spotify_ms, 215_000));
+        // Within -15 seconds
+        assert!(check_duration_tolerance(spotify_ms, 185_000));
 
-        // 1 ms beyond boundary (+5001 ms) -> false
-        assert!(!check_duration_tolerance(spotify_ms, 205_001));
-        // 1 ms beyond boundary (-5001 ms) -> false
-        assert!(!check_duration_tolerance(spotify_ms, 194_999));
+        // 1 ms beyond boundary (+15001 ms) -> false
+        assert!(!check_duration_tolerance(spotify_ms, 215_001));
+        // 1 ms beyond boundary (-15001 ms) -> false
+        assert!(!check_duration_tolerance(spotify_ms, 184_999));
 
         // Huge difference -> false
         assert!(!check_duration_tolerance(spotify_ms, 300_000));
