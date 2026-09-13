@@ -1,5 +1,7 @@
+#[cfg(target_os = "macos")]
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
 use quick_xml::events::Event;
