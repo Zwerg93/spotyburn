@@ -347,7 +347,7 @@ impl DiscBurner for LinuxBurner {
                 for entry in fs::read_dir(tracks_or_cue)? {
                     let entry = entry?;
                     let path = entry.path();
-                    if path.extension().map_or(false, |ext| ext == "wav") {
+                    if path.extension().is_some_and(|ext| ext == "wav") {
                         wavs.push(path);
                     }
                 }

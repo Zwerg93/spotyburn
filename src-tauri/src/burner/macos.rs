@@ -183,11 +183,9 @@ pub fn parse_drutil_status_xml(xml: &str, target_drive_id: &str) -> Result<Media
                             }
                         }
                     }
-                    b"mediaInfo" => {
-                        if in_target_device {
-                            in_media_info = true;
-                            media_present = true;
-                        }
+                    b"mediaInfo" if in_target_device => {
+                        in_media_info = true;
+                        media_present = true;
                     }
                     _ => {}
                 }
@@ -228,15 +226,13 @@ pub fn parse_drutil_status_xml(xml: &str, target_drive_id: &str) -> Result<Media
                                 }
                             }
                         }
-                        b"mediaClass" => {
-                            if media_type.is_none() {
-                                for attr in e.attributes() {
-                                    let attr =
-                                        attr.map_err(|err| BurnError::ParseError(err.to_string()))?;
-                                    if attr.key.as_ref() == b"value" {
-                                        media_type =
-                                            Some(String::from_utf8_lossy(&attr.value).to_string());
-                                    }
+                        b"mediaClass" if media_type.is_none() => {
+                            for attr in e.attributes() {
+                                let attr =
+                                    attr.map_err(|err| BurnError::ParseError(err.to_string()))?;
+                                if attr.key.as_ref() == b"value" {
+                                    media_type =
+                                        Some(String::from_utf8_lossy(&attr.value).to_string());
                                 }
                             }
                         }
